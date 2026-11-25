@@ -106,11 +106,11 @@ text(1512, 34, 280, 26, 'New in this design · RTL, sizes as built')
 text(1800, 34, 590, 26, 'Italic numbers come from the system model', italic=True)
 
 # ------------------------------------------------------------------ regions
-box(20, 66, 990, 470, fill=C['fe'], stroke='none', arc=0, tag='region-front-end')
-box(20, 546, 990, 620, fill=C['ee'], stroke='none', arc=0, tag='region-execution')
+box(20, 66, 990, 440, fill=C['fe'], stroke='none', arc=0, tag='region-front-end')
+box(20, 516, 990, 650, fill=C['ee'], stroke='none', arc=0, tag='region-execution')
 box(1090, 66, 1290, 1100, fill=C['cl'], stroke='none', arc=0, tag='region-cluster')
 box(20, 1176, 2360, 304, fill=C['mem'], stroke='none', arc=0, tag='region-memory')
-text(36, 486, 330, 40, 'Front End', fs=24, bold=True)
+text(36, 462, 240, 40, 'Front End', fs=24, bold=True)
 text(36, 1112, 330, 40, 'Execution Engine', fs=24, bold=True)
 text(2050, 70, 320, 36, 'Compute Cluster', fs=24, bold=True, align='right')
 text(36, 1430, 360, 40, 'Memory Subsystem', fs=24, bold=True)
@@ -136,8 +136,7 @@ box(290, 372, 700, 84, fill=C['cream'], tag='rename')
 text(290, 374, 700, 26, 'Rename / Dispatch', bold=True, align='center')
 cpu(302, 406, 160, 40, 'Int Reg Rename')
 cpu(472, 406, 160, 40, 'FP Reg Rename')
-new(642, 402, 172, 48, '<b>Handle Rename</b><br><font style="font-size:11px">32 names → 256 handles</font>')
-cpu(824, 406, 154, 40, 'Dispatch')
+cpu(642, 402, 336, 48, 'Dispatch<br><font style="font-size:11px">a task instruction takes a reorder buffer entry like any other</font>')
 flow([(140, 348), (140, 366)])
 flow([(240, 386), (265, 386), (265, 110), (290, 110)])
 flow([(365, 134), (365, 172)])
@@ -152,8 +151,11 @@ flow([(885, 332), (885, 372)], color=C['new_dk'])
 text(894, 336, 110, 30, '1 task instr.', fs=12)
 flow([(525, 456), (525, 580)])
 text(534, 496, 90, 30, '4 µop', fs=12)
-flow([(727, 450), (727, 520), (845, 520), (845, 580)], color=C['new_dk'])
-text(854, 496, 150, 40, 'physical<br>handles', fs=12)
+# a task instruction leaves the reorder buffer at commit and only then enters the scheduler
+flow([(640, 580), (640, 542), (690, 542)], color=C['new_dk'], sw=4)
+text(540, 518, 150, 20, 'at commit, in order', fs=12)
+new(690, 524, 305, 36, '<b>Handle Rename</b> · 32 names → 256 handles<br><font style="font-size:11px">after commit: a mapping is never undone</font>')
+flow([(842, 560), (842, 580)], color=C['new_dk'], sw=4)
 
 # ------------------------------------------------------------------ execution engine
 cpu(40, 580, 640, 46, 'Reorder Buffer · 64 entry')
@@ -188,7 +190,7 @@ text(40, 962, 500, 26, 'Load Store Unit', bold=True, align='center')
 cpu(52, 994, 236, 46, 'Load Queue · 16 entry')
 cpu(296, 994, 232, 46, 'Store Queue · 12 entry')
 box(560, 1054, 435, 106, fill=C['new_bg'], stroke=C['new_dk'], sw=1.6, arc=6, tag='task-isa')
-text(572, 1056, 420, 22, 'Task instructions · decoded form; the encoding is open', bold=True, fs=12.5)
+text(572, 1056, 420, 22, 'Task instructions · decoded form, 138 bits; the encoding is open', bold=True, fs=12.5)
 text(572, 1078, 420, 20, '<b>TLoad</b> hd, len, addr · copy a tile from L2 into a free L1 slot', fs=12)
 text(572, 1097, 420, 20, '<b>TRun</b> hd, hs1, hs2, cls, nblk, kern · blocks on data hs1, after hs2', fs=12)
 text(572, 1116, 420, 20, '<b>TJoin</b> hd · done when every older task is done', fs=12)
@@ -245,7 +247,7 @@ text(BX + 12, BY + 6, 700, 30, '(b) One %s · 2 × 2 groups and a domain schedul
 box(BX + 14, BY + 44, 432, 442, fill=C['new_bg'], stroke=C['new_dk'], sw=1.8, arc=6, tag='domain-scheduler')
 text(BX + 14, BY + 46, 432, 28, 'Domain Scheduler', bold=True, fs=15, align='center')
 rows = [(36, '<b>Task table</b> · 4 tasks · kernel, blocks, PE types, slot'),
-        (46, '<b>Load unit</b> · one tile at a time · starts the 4 DMA engines' + SMALL % '8 chunks, each whole rows across the 4 groups · progress = chunks all 4 finished'),
+        (46, '<b>Load unit</b> · one tile · 4 DMA engines, 4 chunks in flight each' + SMALL % '8 chunks, each whole rows across the 4 groups · progress = chunks all 4 finished'),
         (46, '<b>Block counters</b> per task · handed out, eligible, running' + SMALL % 'a task that follows a stream gets blocks as its tile arrives'),
         (46, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % '1. give command &nbsp;2. received block &nbsp;3. idle PE &nbsp;4. next block'),
         (36, '<b>Block read</b> · second stage: the fields of the block'),
@@ -322,8 +324,8 @@ box(CX + 484, by, 142, 52, '1 MiB of the shared L1 SPM', fill=C['spm'], fc='#FFF
 DX, DY, DW, DH = 1760, 660, 600, 492
 box(DX, DY, DW, DH, fill='#FAFAFA', sw=1.8, arc=8, tag='life')
 text(DX + 12, DY + 6, 590, 30, '(d) Life of a task · who decides, and how fast', fs=18, bold=True)
-stages = [('Decode', 'cpu', 'TLoad, TRun, TJoin and TFree are recognised (host CPU, not in RTL yet)', '3-wide'),
-          ('Rename', 'new', 'handle name → physical handle; map stage, then dispatch stage', '1 per cycle'),
+stages = [('Decode', 'cpu', 'recognised, then through the reorder buffer like any instruction; handed over at commit (host CPU, not built)', '3-wide'),
+          ('Rename', 'new', 'after commit: handle name → physical handle; map stage, then dispatch stage', '1 per cycle'),
           ('Window', 'new', 'entry in program order; a TJoin completes at the head', '256 entry'),
           ('Issue', 'new', 'load: the domain with the least work; run: the domain of its data', '1 load + 1 run'),
           ('Hand-over', 'new', 'registered link to the domain scheduler; credits, no ready wire', '2 stages'),
@@ -367,7 +369,7 @@ flow([(1304, 1330), (1304, 1270)], color=C['l2'], sw=6)
 text(1316, 1280, 330, 40, 'weights arrive; blocks become eligible as the tile fills', fs=12.5)
 text(1104, 1390, 880, 36, 'Per layer step, FP16: one decode token streams 116 MiB and uses each weight for 1.1 multiply-adds; a 64-token midfill 770 MiB and 10; '
      'a 2,048-token prefill 1,474 MiB and 174. With few tokens the PEs wait for the lanes.', fs=12.5, italic=True, valign='top')
-text(1104, 1428, 880, 36, '<b>Measured, one domain of real tiles:</b> a 16 KiB tile reaches its L1 slot in 243 cycles (8 chunks of 4 × 512 B, 30 cycles each); '
+text(1104, 1428, 880, 36, '<b>Measured, one domain of real tiles:</b> a 16 KiB tile reaches its L1 slot in 105 cycles with 4 chunks in flight per DMA engine (244 with one); '
      'a matrix block starts 6 cycles after its chunk has arrived in all four groups, while later chunks still stream.', fs=12.5, valign='top')
 
 xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<mxfile host="app.diagrams.net">\n  <diagram name="TeraNoC-OoO architecture" id="teranoc-ooo-arch">\n'
