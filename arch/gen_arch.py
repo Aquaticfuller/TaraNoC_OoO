@@ -100,7 +100,7 @@ text(20, 8, 1440, 44, 'TeraNoC-OoO · an out-of-order host CPU schedules a share
 box(1480, 12, 26, 18, fill=C['white'])
 text(1512, 8, 280, 26, 'Host CPU, C910-class · not built yet')
 box(1800, 12, 26, 18, fill=C['grp'])
-text(1832, 8, 560, 26, 'Compute cluster: TeraMonster tiles · one domain runs under the scheduler')
+text(1832, 8, 560, 26, 'Compute cluster: TeraMonster tiles · four domains run under the scheduler')
 box(1480, 38, 26, 18, fill=C['new'], sw=1.6)
 text(1512, 34, 280, 26, 'New in this design · RTL, sizes as built')
 text(1800, 34, 590, 26, 'Italic numbers come from the system model', italic=True)
@@ -209,7 +209,7 @@ rtext(1069, 730, 470, 'TLoad · L2 address, length, L1 slot · four DMA engines 
 
 # ------------------------------------------------------------------ (a) cluster overview
 text(1110, 74, 620, 30, '(a) Compute cluster · 8 × 8 groups · 16 %ss' % DOMAIN, fs=18, bold=True)
-text(1110, 102, 500, 44, 'A domain: one task port, one load port, one domain scheduler.<br>No links between domains: work moves through the CPU. Any PE reads any domain.', fs=12.5, valign='top')
+text(1110, 102, 500, 44, 'A domain: one task port, one load port, one domain scheduler.<br>No links between domains: work moves through the CPU. A PE reads any domain\'s tile through an absolute address window.', fs=12.5, valign='top')
 GX, GY, P, G = 1152, 180, 54, 36
 box(1108, 174, 20, 426, fill=C['new_dk'], stroke=C['new_dk'], arc=3, tag='task-port-bus')
 rtext(1118, 387, 420, '16 task ports and 16 load ports · one pair per domain scheduler', fs=11.5, fc='#FFFFFF', bold=True)
@@ -249,7 +249,7 @@ text(BX + 14, BY + 46, 432, 28, 'Domain Scheduler', bold=True, fs=15, align='cen
 rows = [(36, '<b>Task table</b> · 4 tasks · kernel, blocks, PE types, slot'),
         (46, '<b>Load unit</b> · one tile · 4 DMA engines, 4 chunks in flight each' + SMALL % '8 chunks, each whole rows across the 4 groups · progress = chunks all 4 finished'),
         (46, '<b>Block counters</b> per task · handed out, eligible, running' + SMALL % 'a task that follows a stream gets blocks as its tile arrives'),
-        (46, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % '1. give command &nbsp;2. received block &nbsp;3. idle PE &nbsp;4. next block'),
+        (46, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % '1. give &nbsp;2. received block &nbsp;3. idle PE &nbsp;4. next block if no neighbour wants'),
         (36, '<b>Block read</b> · second stage: the fields of the block'),
         (46, '<b>Give and take</b> · on command of the cluster level' + SMALL % 'reports idle PEs and spare blocks · gives one block per command'),
         (36, '<b>Done</b> → completion of a task or a load to the cluster level')]
@@ -369,8 +369,8 @@ flow([(1304, 1330), (1304, 1270)], color=C['l2'], sw=6)
 text(1316, 1280, 330, 40, 'weights arrive; blocks become eligible as the tile fills', fs=12.5)
 text(1104, 1390, 880, 36, 'Per layer step, FP16: one decode token streams 116 MiB and uses each weight for 1.1 multiply-adds; a 64-token midfill 770 MiB and 10; '
      'a 2,048-token prefill 1,474 MiB and 174. With few tokens the PEs wait for the lanes.', fs=12.5, italic=True, valign='top')
-text(1104, 1428, 880, 36, '<b>Measured, one domain of real tiles:</b> a 16 KiB tile reaches its L1 slot in 105 cycles with 4 chunks in flight per DMA engine (244 with one); '
-     'a matrix block starts 6 cycles after its chunk has arrived in all four groups, while later chunks still stream.', fs=12.5, valign='top')
+text(1104, 1428, 880, 36, '<b>Measured, four domains of real tiles:</b> a 16 KiB tile reaches its L1 slot in 105 cycles; 32 matrix blocks on it: 16 run at home, '
+     '16 move to the three other domains and read the tile there; all done 1,032 cycles after the first start (1,649 before the next-block rule).', fs=12.5, valign='top')
 
 xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<mxfile host="app.diagrams.net">\n  <diagram name="TeraNoC-OoO architecture" id="teranoc-ooo-arch">\n'
        '    <mxGraphModel grid="1" page="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="%d" pageHeight="%d" '
