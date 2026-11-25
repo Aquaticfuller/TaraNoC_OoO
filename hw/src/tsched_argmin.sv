@@ -17,7 +17,8 @@ module tsched_argmin #(
   input  logic [N-1:0]             valid_i,
   input  logic [N-1:0][KeyW-1:0]   key_i,
   output logic                     valid_o,
-  output logic [IdxW-1:0]          idx_o
+  output logic [IdxW-1:0]          idx_o,
+  output logic [N-1:0]             oh_o       // the same choice one-hot; zero when valid_o is low
 );
 
   localparam int unsigned M  = (N + 3) / 4;
@@ -28,6 +29,7 @@ module tsched_argmin #(
   logic [M-1:0][IdxW-1:0] i1_d, i1_q;
   logic                   v2_d, v2_q;
   logic [IdxW-1:0]        i2_d, i2_q;
+  logic [N-1:0]           oh_d, oh_q;
 
   // Both steps are binary trees in heap layout (node i has the children 2i and 2i + 1). The left child
   // wins unless the right one is valid and strictly smaller, so equal keys resolve to the lower index.
@@ -91,6 +93,7 @@ module tsched_argmin #(
     end
     v2_d = v[1];
     i2_d = x[1];
+    for (int unsigned n = 0; n < N; n++) oh_d[n] = v[1] & (x[1] == IdxW'(n));
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -100,16 +103,19 @@ module tsched_argmin #(
       i1_q <= '0;
       v2_q <= 1'b0;
       i2_q <= '0;
+      oh_q <= '0;
     end else begin
       v1_q <= v1_d;
       k1_q <= k1_d;
       i1_q <= i1_d;
       v2_q <= v2_d;
       i2_q <= i2_d;
+      oh_q <= oh_d;
     end
   end
 
   assign valid_o = v2_q;
   assign idx_o   = i2_q;
+  assign oh_o    = oh_q;
 
 endmodule

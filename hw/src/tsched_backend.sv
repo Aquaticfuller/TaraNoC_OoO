@@ -74,6 +74,9 @@ module tsched_backend import tsched_pkg::*; (
   wake_done_t  wake_done_q;
   logic        wake_v_q;
   phys_t       wake_tag_q;
+  // The reference a finished task held on its data handle, returned one cycle after the window read.
+  logic        rdec_v_q;
+  phys_t       rdec_q;
   assign wake_done_q = '{v: wake_v_q, tag: wake_tag_q};
 
   phys_t   [1:0] hf_rd;
@@ -151,8 +154,8 @@ module tsched_backend import tsched_pkg::*; (
     .unmap_i           (unmap),
     .ref_inc_i         (riq_valid & riq.s1_v),
     .ref_inc_p_i       (riq.s1),
-    .ref_dec_i         (dn_valid_q & dn_s1_v),
-    .ref_dec_p_i       (dn_s1),
+    .ref_dec_i         (rdec_v_q),
+    .ref_dec_p_i       (rdec_q),
     .place_i           (place),
     .done_i            (wake_done_q),
     .use_valid_i       (issue_valid & issue.slot_v),
@@ -240,6 +243,7 @@ module tsched_backend import tsched_pkg::*; (
   logic [NumDomains-1:0][KeyW-1:0] any_key;
   logic                            any_v;
   dom_t                            any_dom;
+  logic [NumDomains-1:0]           any_oh;
   dom_t                            any_rot_q;
   logic [3:0]                      any_hold_q;
 
@@ -256,7 +260,8 @@ module tsched_backend import tsched_pkg::*; (
     .valid_i (credit_ok),
     .key_i   (any_key),
     .valid_o (any_v),
-    .idx_o   (any_dom)
+    .idx_o   (any_dom),
+    .oh_o    (any_oh)
   );
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -273,7 +278,7 @@ module tsched_backend import tsched_pkg::*; (
   end
 
   logic any_ok;
-  assign any_ok = any_v & credit_ok[any_dom] & ~(|any_hold_q) & ~(grant_valid & grant_any);
+  assign any_ok = (|(credit_ok & any_oh)) & ~(|any_hold_q) & ~(grant_valid & grant_any);
 
   tsched_run_iq i_run_iq (
     .clk_i,
@@ -343,9 +348,11 @@ module tsched_backend import tsched_pkg::*; (
     if (!rst_ni) begin
       dn_valid_q <= 1'b0;
       wake_v_q   <= 1'b0;
+      rdec_v_q   <= 1'b0;
     end else begin
       dn_valid_q <= arb_valid;
       wake_v_q   <= dn_valid_q & dn_pd_v;
+      rdec_v_q   <= dn_valid_q & dn_s1_v;
     end
   end
 
@@ -353,6 +360,7 @@ module tsched_backend import tsched_pkg::*; (
     dn_q       <= arb_out;
     dn_src_q   <= arb_idx;
     wake_tag_q <= dn_pd;
+    rdec_q     <= dn_s1;
   end
 
 `ifndef TARGET_SYNTHESIS

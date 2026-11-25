@@ -5,7 +5,7 @@
 // Handle rename: one task instruction per cycle, in two stages.
 //
 //   map       read and update the map table, take a fresh physical handle
-//   dispatch  check the window, the queue and the reference counter, then enter the task
+//   dispatch  check the window, the queue and the user counter of the data handle, then enter the task
 //
 // Task instructions are not speculative, so the map table is final once it is written and the map
 // stage never has to be undone. The two stages are separated by a two-entry buffer whose ready is a
@@ -113,32 +113,33 @@ module tsched_rename import tsched_pkg::*; (
   logic               nf_valid_d, nf_valid_q;
   phys_t              nf_d, nf_q;
   phys_t              cand;
-  logic               cand_empty;
+  logic [NumPhys-1:0] cand_oh;
+  logic               cand_any;
   logic               refill;
 
-  lzc #(
-    .WIDTH (NumPhys),
-    .MODE  (1'b0)
-  ) i_lzc_free (
-    .in_i    (free_q),
-    .cnt_o   (cand),
-    .empty_o (cand_empty)
+  // The first free handle, one-hot to clear its bit and as an index for the register.
+  tsched_first_oh #(
+    .N (NumPhys)
+  ) i_first_free (
+    .in_i  (free_q),
+    .any_o (cand_any),
+    .oh_o  (cand_oh),
+    .idx_o (cand)
   );
 
   assign m_valid       = instr_valid_i & (~need_pd | nf_valid_q);
   assign instr_ready_o = m_ready & (~need_pd | nf_valid_q);
   assign fire          = instr_valid_i & instr_ready_o;
 
-  assign refill = (~nf_valid_q | (fire & need_pd)) & ~cand_empty;
+  assign refill = (~nf_valid_q | (fire & need_pd)) & cand_any;
 
   always_comb begin
-    free_d     = free_q;
+    free_d     = free_q & ~({NumPhys{refill}} & cand_oh);
     nf_d       = nf_q;
     nf_valid_d = nf_valid_q;
     if (refill) begin
-      nf_d         = cand;
-      nf_valid_d   = 1'b1;
-      free_d[cand] = 1'b0;
+      nf_d       = cand;
+      nf_valid_d = 1'b1;
     end else if (fire && need_pd) begin
       nf_valid_d = 1'b0;
     end
@@ -217,7 +218,24 @@ module tsched_rename import tsched_pkg::*; (
   assign r_run  = r.op == TRun;
   assign r_free = r.op == TFree;
 
-  assign q_ready = r_load ? loadq_ready_i : (r_run ? (riq_ready_i & ~(r.s1_v & s1_sat_i)) : 1'b1);
+  // A run that uses data takes a reference on its handle, which needs room in the user counter of that
+  // handle. The counter is read from the handle file one cycle ahead, into chk_q and sat_q, so that this
+  // wide read is not in front of the checks below. chk_q says that the instruction now in this stage
+  // waited here in the previous cycle: the read was for its handle, and no reference was taken since.
+  // The counter can only have gone down, so a stale "full" costs a cycle and a stale "room" does not
+  // occur. Such a run stays two cycles in this stage; every other instruction stays one.
+  logic chk_q, sat_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      chk_q <= 1'b0;
+      sat_q <= 1'b0;
+    end else begin
+      chk_q <= r_valid & ~r_fire;
+      sat_q <= s1_sat_i;
+    end
+  end
+
+  assign q_ready = r_load ? loadq_ready_i : (r_run ? (riq_ready_i & (~r.s1_v | (chk_q & ~sat_q))) : 1'b1);
   assign r_ready = (win_ready_i | r_free) & q_ready;
   assign r_fire  = r_valid & r_ready;
   assign busy_o  = r_valid;

@@ -95,15 +95,28 @@ module tsched_handle_file import tsched_pkg::*; #(
 
   assign free_valid_o      = gc_v_q;
   assign free_o            = gc_q;
-  assign slot_free_valid_o = gc_v_q & placed_q[gc_q];
-  assign slot_free_dom_o   = dom_q[gc_q];
-  assign slot_free_o       = slot_q[gc_q];
 
+  // What the load placement hears (a slot is free again; placed data stopped waiting for its first
+  // task) is read from the tables by index and leaves through registers, one cycle later. Hearing it
+  // late is safe: the slot is only seen free later, and the count of waiting data is only a preference.
   // A handle with a task being issued holds a reference, so it is not the one being released.
-  assign unused_dec_valid_o[0] = use_valid_i & placed_q[use_i] & ~used_q[use_i];
-  assign unused_dec_dom_o[0]   = dom_q[use_i];
-  assign unused_dec_valid_o[1] = gc_v_q & placed_q[gc_q] & ~used_q[gc_q];
-  assign unused_dec_dom_o[1]   = dom_q[gc_q];
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      slot_free_valid_o  <= 1'b0;
+      unused_dec_valid_o <= '0;
+    end else begin
+      slot_free_valid_o     <= gc_v_q & placed_q[gc_q];
+      unused_dec_valid_o[0] <= use_valid_i & placed_q[use_i] & ~used_q[use_i];
+      unused_dec_valid_o[1] <= gc_v_q & placed_q[gc_q] & ~used_q[gc_q];
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    slot_free_dom_o     <= dom_q[gc_q];
+    slot_free_o         <= slot_q[gc_q];
+    unused_dec_dom_o[0] <= dom_q[use_i];
+    unused_dec_dom_o[1] <= dom_q[gc_q];
+  end
 
   // -------------------------------------------------------------------------------------------
   // State

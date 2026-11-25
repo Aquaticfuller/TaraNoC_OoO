@@ -80,7 +80,10 @@ module tsched_load_issue import tsched_pkg::*; (
   logic [NumDomains-1:0][KeyW-1:0] key;
   logic                            best_v;
   dom_t                            best;
+  logic [NumDomains-1:0]           best_oh;       // the chosen domain, one-hot
   logic                            issue;
+  logic [SlotsPerDomain-1:0]       best_free;     // free slots of the chosen domain
+  logic [SlotsPerDomain-1:0]       slot_oh;       // the slot the load gets, one-hot
   slot_t                           slot;
   logic                            slot_none;
   logic                            place_v_q;
@@ -105,19 +108,32 @@ module tsched_load_issue import tsched_pkg::*; (
     .valid_i (elig),
     .key_i   (key),
     .valid_o (best_v),
-    .idx_o   (best)
+    .idx_o   (best),
+    .oh_o    (best_oh)
   );
 
-  lzc #(
-    .WIDTH (SlotsPerDomain),
-    .MODE  (1'b0)
-  ) i_lzc_slot (
-    .in_i    (slot_free_q[best]),
-    .cnt_o   (slot),
-    .empty_o (slot_none)
+  // The chosen domain selects with a one-hot vector: an AND-OR, no decode of an index.
+  tsched_oh_mux #(
+    .N (NumDomains),
+    .W (SlotsPerDomain)
+  ) i_best_free (
+    .sel_i  (best_oh),
+    .data_i (slot_free_q),
+    .data_o (best_free)
   );
 
-  assign issue = q_valid & best_v & elig[best] & (lanes_q >= LaneW'(LanesPerLoad));
+  tsched_first_oh #(
+    .N (SlotsPerDomain),
+    .B (SlotsPerDomain)
+  ) i_first_slot (
+    .in_i  (best_free),
+    .any_o (/* unused */),
+    .oh_o  (slot_oh),
+    .idx_o (slot)
+  );
+  assign slot_none = ~(|best_free);
+
+  assign issue = q_valid & (|(elig & best_oh)) & (lanes_q >= LaneW'(LanesPerLoad));
   assign q_pop = issue;
 
   always_comb begin
@@ -127,14 +143,16 @@ module tsched_load_issue import tsched_pkg::*; (
     rot_d       = rot_q;
     if (slot_free_valid_i) slot_free_d[slot_free_dom_i][slot_free_i] = 1'b1;
     if (load_done_i) dma_busy_d[load_done_dom_i] = 1'b0;
-    if (issue) begin
-      dma_busy_d[best]        = 1'b1;
-      slot_free_d[best][slot] = 1'b0;
-      rot_d                   = best + dom_t'(PlaceStride);
+    if (issue) rot_d = best + dom_t'(PlaceStride);
+    for (int unsigned d = 0; d < NumDomains; d++) begin
+      if (issue && best_oh[d]) begin
+        dma_busy_d[d]  = 1'b1;
+        slot_free_d[d] = slot_free_d[d] & ~slot_oh;
+      end
     end
     lanes_d = lanes_q + (load_done_i ? LaneW'(LanesPerLoad) : '0) - (issue ? LaneW'(LanesPerLoad) : '0);
     for (int unsigned d = 0; d < NumDomains; d++) begin
-      pend_d[d] = pend_q[d] + PendW'(issue & (best == dom_t'(d)))
+      pend_d[d] = pend_q[d] + PendW'(issue & best_oh[d])
                 - PendW'(unused_dec_valid_i[0] & (unused_dec_dom_i[0] == dom_t'(d)))
                 - PendW'(unused_dec_valid_i[1] & (unused_dec_dom_i[1] == dom_t'(d)));
     end
@@ -155,8 +173,7 @@ module tsched_load_issue import tsched_pkg::*; (
       slot_free_q  <= slot_free_d;
       rot_q        <= rot_d;
       pend_q       <= pend_d;
-      load_valid_o <= '0;
-      load_valid_o[best] <= issue;
+      load_valid_o <= {NumDomains{issue}} & best_oh;
       place_v_q    <= issue;
     end
   end

@@ -28,7 +28,7 @@ schedulers cut them into blocks and hand the blocks to idle PEs.
 | `tsched_run_iq` | Runs wait for their handles; the oldest ready one goes to the domain that holds its data |
 | `tsched_domain` | Domain scheduler: block cutting, stream following, dispatch, lending to neighbours, join counters |
 | `tsched_group_disp` | Group dispatcher: next-block register per PE class, PE start and completion |
-| `tsched_age_sel`, `tsched_rr_sel`, `tsched_argmin`, `tsched_oh_mux` | Selects: oldest first, round robin with a one-hot grant, minimum search, one-hot multiplexer |
+| `tsched_age_sel`, `tsched_rr_sel`, `tsched_argmin`, `tsched_first_oh`, `tsched_oh_mux` | Selects: oldest first, round robin with a one-hot grant, minimum search, first set bit, one-hot multiplexer |
 | `tsched_cluster`, `tsched_top` | Domain mesh, group dispatchers, registered links to the cluster level |
 
 Sizes are in `hw/src/tsched_pkg.sv`; each can be overridden with a define.
