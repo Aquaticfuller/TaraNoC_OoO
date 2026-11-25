@@ -1,0 +1,13 @@
+# Bender configuration of this repository.
+# TeraMonster resolves the version conflicts among its dependencies by being the root package. Here it is a
+# dependency, so the conflicting ones are pinned to the versions of its lock file, and the three packages it
+# keeps as folders of its own repository are taken from its clone in the working directory (`bender clone mempool`).
+# fpnew and register_interface conflict too; they are among the dependencies with local changes, which
+# `Bender.local` points to their clones in the working directory (see README).
+overrides:
+  axi:                   { git: "https://github.com/pulp-platform/axi.git", version: 0.39.11 }
+  cluster_interconnect:  { git: "https://github.com/pulp-platform/cluster_interconnect.git", version: 1.3.0 }
+  reqrsp_interface:      { path: "working_dir/mempool/hardware/deps/reqrsp_interface" }
+  scm:                   { path: "working_dir/mempool/hardware/deps/scm" }
+  snitch:                { path: "working_dir/mempool/hardware/deps/snitch" }
+  obi:                   { git: "https://github.com/pulp-platform/obi.git", rev: 8097928cf1b43712f93d5356f336397879b4ad2c }

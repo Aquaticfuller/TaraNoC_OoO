@@ -28,3 +28,6 @@ transcript
 syn/build/
 notes/
 ext/
+working_dir/
+Bender.local
+hw/.bender/

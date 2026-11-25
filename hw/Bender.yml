@@ -1,0 +1,38 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Solderpad Hardware License, Version 0.51, see LICENSE for details.
+# SPDX-License-Identifier: SHL-0.51
+
+# The task scheduler on its own. It depends on common_cells only, so it can be simulated and measured
+# without the cluster hardware. The repository's top-level package adds the cluster.
+package:
+  name: tsched
+
+dependencies:
+  common_cells: { git: "https://github.com/pulp-platform/common_cells.git", version: 1.37.0 }
+
+sources:
+  # Level 0
+  - src/tsched_pkg.sv
+  # Level 1
+  - src/tsched_age_sel.sv
+  - src/tsched_oh_mux.sv
+  - src/tsched_argmin.sv
+  - src/tsched_first_oh.sv
+  - src/tsched_rr_sel.sv
+  - src/tsched_rename.sv
+  - src/tsched_window.sv
+  - src/tsched_handle_file.sv
+  - src/tsched_run_iq.sv
+  - src/tsched_load_issue.sv
+  - src/tsched_group_disp.sv
+  - src/tsched_domain.sv
+  - src/tsched_balance.sv
+  # Level 2
+  - src/tsched_backend.sv
+  - src/tsched_cluster.sv
+  # Level 3
+  - src/tsched_top.sv
+
+  - target: any(simulation, test)
+    files:
+      - tb/tb_tsched.sv

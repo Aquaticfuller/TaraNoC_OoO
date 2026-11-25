@@ -34,19 +34,58 @@ schedulers cut them into blocks and hand the blocks to idle PEs.
 
 Sizes are in `hw/src/tsched_pkg.sv`; each can be overridden with a define.
 
-## Running
+## Packages and dependencies
 
-Dependencies are managed with [Bender](https://github.com/pulp-platform/bender).
+Dependencies are managed with [Bender](https://github.com/pulp-platform/bender). There are two packages:
+
+| Package | Manifest | Content |
+|---|---|---|
+| `tsched` | `hw/Bender.yml` | The task scheduler alone. Depends on `common_cells` only. |
+| `teranoc_ooo` | `Bender.yml` | The system: `tsched` and the cluster hardware (TeraMonster, package `mempool`). |
+
+TeraMonster and the dependencies it changes are worked on as `bender clone`s in `working_dir/`, each on a
+local branch `teranoc-ooo`. The clones are not part of this repository; `Bender.local` points Bender to them.
+Until those branches exist on the remotes, the system package can only be built where the clones are.
+
+| Dependency | Remote | Base revision | Local change |
+|---|---|---|---|
+| `mempool` | liyinrong/TeraNoC, branch `monster-dev` | c76265fac3 | one-domain configuration `config/domain_2x2.mk` |
+| `cluster_icache` | pulp-platform/cluster_icache | 1642961b95 | TeraMonster's change (its `hardware/deps/patches`) |
+| `floo_noc` | pulp-platform/FlooNoC | 14c253c996 | same |
+| `fpnew` | pulp-platform/cvfpu | 841b19b9fc | same |
+| `fractal_sync` | VictorIsachi/fractal_sync | df8e21b7e2 | same |
+| `hci` | pulp-platform/hci | a8d8132b7f | same |
+| `hwpe-stream` | pulp-platform/hwpe-stream | 05cb830369 | same |
+| `ibex` | pulp-platform/ibex | b18f7ef178 | same |
+| `idma` | pulp-platform/iDMA | 28a36e5e07 | same |
+| `redmule` | liyinrong/redmule | 29fefc29ed | same |
+| `register_interface` | pulp-platform/register_interface | d6e1d4cdaa | same |
+| `spatz_vpu` | liyinrong/spatz_vpu | 8b46477aa8 | same |
+| `tech_cells_generic` | pulp-platform/tech_cells_generic | 3a3de73632 | same |
+
+`.bender.yml` pins the other dependencies on which TeraMonster's packages disagree to the versions of its
+lock file, and takes `snitch`, `reqrsp_interface` and `scm` from the folders inside the TeraMonster clone.
+
+## Running the scheduler alone
 
 ```sh
-bender update
-cd sim
+cd hw && bender update && cd ../sim
 make compile CFG=small DEFS="+define+TSCHED_DOM_PER_SIDE=2"
 make regress CFG=small SIDE=2 SLOTS=4 SEEDS=20      # random programs
 make compile CFG=full
 python3 ../scripts/gen_program.py moe prog/moe64 --kind midfill --n 64 --synthetic
 make run CFG=full PROG=prog/moe64
+cd ../syn && make depth                              # logic depth and size with yosys
 ```
 
 `gen_program.py moe` without `--synthetic` needs a routing trace (`--trace <dir>`), which is not part of
 this repository.
+
+## Running one domain of cluster hardware
+
+```sh
+cd sim
+make -f domain.mk setup              # links to the toolchains and to Python 3.12, once
+make -f domain.mk hw                 # 2 x 2 groups, 16 tiles, 16 tensor engines, 48 vector units
+make -f domain.mk run APP=hello_world
+```

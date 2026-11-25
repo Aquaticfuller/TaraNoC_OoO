@@ -25,7 +25,7 @@ MODULES ?= tsched_rename tsched_window tsched_handle_file tsched_run_iq tsched_l
 
 depth:
 	@mkdir -p $(BUILD)
-	@cd $(ROOT) && $(BENDER) script flist -t rtl -t synthesis | grep -E '\.sv$$' \
+	@cd $(ROOT)/hw && $(BENDER) script flist -t rtl -t synthesis | grep -E '\.sv$$' \
 	  | grep -E '(cf_math_pkg|lzc|rr_arb_tree|fifo_v3|spill_register_flushable|spill_register|tsched_[a-z_0-9]*)\.sv$$' > $(BUILD)/files.f
 	@printf '%-20s %6s %8s %8s   %s\n' block levels gates flops 'longest path'
 	@for m in $(MODULES); do \

@@ -2,7 +2,7 @@
 # Solderpad Hardware License, Version 0.51, see LICENSE for details.
 # SPDX-License-Identifier: SHL-0.51
 
-# RTL simulation of the task scheduler with VCS.
+# RTL simulation of the task scheduler alone (package `tsched` in hw/) with VCS.
 #
 #   make compile CFG=<name> DEFS="+define+..."   build sim/build/<name>/simv
 #   make run     CFG=<name> PROG=<dir> [ARGS=..] run one program, log in <dir>/sim_<name>.log
@@ -30,9 +30,9 @@ VLOGAN_ARGS := -assert svaext +v2k -override_timescale=1ns/1ps -nc $(DEFS)
 
 compile: $(BUILD)/simv
 
-$(BUILD)/simv: $(wildcard $(ROOT)/hw/src/*.sv) $(wildcard $(ROOT)/hw/tb/*.sv) $(ROOT)/Bender.yml
+$(BUILD)/simv: $(wildcard $(ROOT)/hw/src/*.sv) $(wildcard $(ROOT)/hw/tb/*.sv) $(ROOT)/hw/Bender.yml
 	mkdir -p $(BUILD)
-	cd $(ROOT) && $(BENDER) script vcs --vlogan-bin="$(VCS) vlogan" --vlog-arg="$(VLOGAN_ARGS)" -t rtl -t test > $(BUILD)/compile.sh
+	cd $(ROOT)/hw && $(BENDER) script vcs --vlogan-bin="$(VCS) vlogan" --vlog-arg="$(VLOGAN_ARGS)" -t rtl -t test > $(BUILD)/compile.sh
 	cd $(BUILD) && bash compile.sh > compile.log 2>&1 || (tail -30 compile.log; false)
 	cd $(BUILD) && $(VCS) vcs -full64 -nc tb_tsched -assert disable_cover -o simv > elab.log 2>&1 || (tail -30 elab.log; false)
 
