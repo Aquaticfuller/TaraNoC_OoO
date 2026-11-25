@@ -20,41 +20,77 @@ module tsched_argmin #(
   output logic [IdxW-1:0]          idx_o
 );
 
-  localparam int unsigned M = (N + 3) / 4;
+  localparam int unsigned M  = (N + 3) / 4;
+  localparam int unsigned P2 = 1 << ((M > 1) ? $clog2(M) : 1);
 
   logic [M-1:0]           v1_d, v1_q;
   logic [M-1:0][KeyW-1:0] k1_d, k1_q;
   logic [M-1:0][IdxW-1:0] i1_d, i1_q;
   logic                   v2_d, v2_q;
-  logic [KeyW-1:0]        k2;
   logic [IdxW-1:0]        i2_d, i2_q;
 
+  // Both steps are binary trees in heap layout (node i has the children 2i and 2i + 1). The left child
+  // wins unless the right one is valid and strictly smaller, so equal keys resolve to the lower index.
+
+  // Step 1: the smallest of each group of four.
   always_comb begin
     for (int unsigned m = 0; m < M; m++) begin
-      v1_d[m] = 1'b0;
-      k1_d[m] = '1;
-      i1_d[m] = '0;
+      logic [7:0]           v;
+      logic [7:0][KeyW-1:0] k;
+      logic [7:0][IdxW-1:0] x;
+      v = '0;
+      k = '0;
+      x = '0;
       for (int unsigned j = 0; j < 4; j++) begin
-        if ((4 * m + j < N) && valid_i[4 * m + j] && (!v1_d[m] || (key_i[4 * m + j] < k1_d[m]))) begin
-          v1_d[m] = 1'b1;
-          k1_d[m] = key_i[4 * m + j];
-          i1_d[m] = IdxW'(4 * m + j);
+        if (4 * m + j < N) begin
+          v[4 + j] = valid_i[4 * m + j];
+          k[4 + j] = key_i[4 * m + j];
+          x[4 + j] = IdxW'(4 * m + j);
         end
       end
+      for (int unsigned i = 3; i >= 1; i--) begin
+        if (v[2 * i + 1] && (!v[2 * i] || (k[2 * i + 1] < k[2 * i]))) begin
+          v[i] = 1'b1;
+          k[i] = k[2 * i + 1];
+          x[i] = x[2 * i + 1];
+        end else begin
+          v[i] = v[2 * i];
+          k[i] = k[2 * i];
+          x[i] = x[2 * i];
+        end
+      end
+      v1_d[m] = v[1];
+      k1_d[m] = k[1];
+      i1_d[m] = x[1];
     end
   end
 
+  // Step 2: the smallest of the group winners.
   always_comb begin
-    v2_d = 1'b0;
-    k2   = '1;
-    i2_d = '0;
+    logic [2*P2-1:0]           v;
+    logic [2*P2-1:0][KeyW-1:0] k;
+    logic [2*P2-1:0][IdxW-1:0] x;
+    v = '0;
+    k = '0;
+    x = '0;
     for (int unsigned m = 0; m < M; m++) begin
-      if (v1_q[m] && (!v2_d || (k1_q[m] < k2))) begin
-        v2_d = 1'b1;
-        k2   = k1_q[m];
-        i2_d = i1_q[m];
+      v[P2 + m] = v1_q[m];
+      k[P2 + m] = k1_q[m];
+      x[P2 + m] = i1_q[m];
+    end
+    for (int unsigned i = P2 - 1; i >= 1; i--) begin
+      if (v[2 * i + 1] && (!v[2 * i] || (k[2 * i + 1] < k[2 * i]))) begin
+        v[i] = 1'b1;
+        k[i] = k[2 * i + 1];
+        x[i] = x[2 * i + 1];
+      end else begin
+        v[i] = v[2 * i];
+        k[i] = k[2 * i];
+        x[i] = x[2 * i];
       end
     end
+    v2_d = v[1];
+    i2_d = x[1];
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin

@@ -13,6 +13,7 @@ sources:
   - hw/src/tsched_pkg.sv
   # Level 1
   - hw/src/tsched_age_sel.sv
+  - hw/src/tsched_oh_mux.sv
   - hw/src/tsched_argmin.sv
   - hw/src/tsched_rename.sv
   - hw/src/tsched_window.sv

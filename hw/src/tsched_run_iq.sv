@@ -150,40 +150,45 @@ module tsched_run_iq import tsched_pkg::*; (
     .gnt_o     (gnt)
   );
 
-  // The grant is one-hot, so a field of the selected entry is an OR over the gated entries.
+  // The grant is one-hot, so a field of the granted entry is a one-hot multiplexer over the entries.
   // Grant stage: only the domain, which is narrow.
-  logic [N-1:0] gnt_q;
-  dom_t         sel_dom;
-  logic         sel_placed;
-  always_comb begin
-    sel_dom    = '0;
-    sel_placed = 1'b0;
-    for (int unsigned i = 0; i < N; i++) begin
-      sel_dom    |= {DomW{gnt[i]}} & dom_q[i];
-      sel_placed |= gnt[i] & s1_placed_q[i];
-    end
+  localparam int unsigned GntW = 1 + DomW;
+  localparam int unsigned RdW  = $bits(payload_t) + PhysW + SlotW + 2;
+
+  logic [N-1:0]           gnt_q;
+  logic [N-1:0][GntW-1:0] gnt_fields;
+  logic [N-1:0][RdW-1:0]  rd_fields;
+  dom_t                   sel_dom;
+  logic                   sel_placed;
+  payload_t               rd_payload;
+  phys_t                  rd_s1;
+  slot_t                  rd_slot;
+  logic                   rd_placed, rd_follow;
+
+  for (genvar i = 0; i < N; i++) begin : gen_fields
+    assign gnt_fields[i] = {s1_placed_q[i], dom_q[i]};
+    assign rd_fields[i]  = {payload_q[i], s1_q[i], slot_q[i], s1_placed_q[i], s1_follow_q[i]};
   end
+
+  tsched_oh_mux #(
+    .N (N),
+    .W (GntW)
+  ) i_gnt_mux (
+    .sel_i  (gnt),
+    .data_i (gnt_fields),
+    .data_o ({sel_placed, sel_dom})
+  );
   assign gnt_any = |gnt;
 
   // Issue stage: the rest of the entry, selected by the registered grant.
-  payload_t rd_payload;
-  phys_t    rd_s1;
-  slot_t    rd_slot;
-  logic     rd_placed, rd_follow;
-  always_comb begin
-    rd_payload = '0;
-    rd_s1      = '0;
-    rd_slot    = '0;
-    rd_placed  = 1'b0;
-    rd_follow  = 1'b0;
-    for (int unsigned i = 0; i < N; i++) begin
-      rd_payload |= {$bits(payload_t){gnt_q[i]}} & payload_q[i];
-      rd_s1      |= {PhysW{gnt_q[i]}} & s1_q[i];
-      rd_slot    |= {SlotW{gnt_q[i]}} & slot_q[i];
-      rd_placed  |= gnt_q[i] & s1_placed_q[i];
-      rd_follow  |= gnt_q[i] & s1_follow_q[i];
-    end
-  end
+  tsched_oh_mux #(
+    .N (N),
+    .W (RdW)
+  ) i_rd_mux (
+    .sel_i  (gnt_q),
+    .data_i (rd_fields),
+    .data_o ({rd_payload, rd_s1, rd_slot, rd_placed, rd_follow})
+  );
 
   always_comb begin
     valid_d = (valid_q & ~gnt) | push_oh;
