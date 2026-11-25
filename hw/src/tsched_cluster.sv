@@ -34,6 +34,7 @@ module tsched_cluster import tsched_pkg::*; #(
   input  blk_t      [NumDomains-1:0]          bblk_i,
   output logic      [NumDomains-1:0]          bpop_valid_o,
   output logic      [NumDomains-1:0]          bpop_cls_o,
+  input  logic      [NumDomains-1:0][NumCls-1:0] wanted_i,
   input  logic      [NumDomains-1:0]          ret_valid_i,
   input  tix_t      [NumDomains-1:0]          ret_tix_i,
   // DMA engines, per group
@@ -98,6 +99,7 @@ module tsched_cluster import tsched_pkg::*; #(
       .bblk_i         (bblk_i[d]),
       .bpop_valid_o   (bpop_valid_o[d]),
       .bpop_cls_o     (bpop_cls_o[d]),
+      .wanted_i       (wanted_i[d]),
       .ret_valid_i    (ret_valid_i[d]),
       .ret_tix_i      (ret_tix_i[d])
     );

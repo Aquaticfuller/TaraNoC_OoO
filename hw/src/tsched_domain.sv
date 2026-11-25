@@ -66,6 +66,7 @@ module tsched_domain import tsched_pkg::*; #(
   input  blk_t                                    bblk_i,
   output logic                                    bpop_valid_o,   // such a block left the queue for a group
   output logic                                    bpop_cls_o,
+  input  logic [NumCls-1:0]                       wanted_i,       // a domain within reach wants the class
   input  logic                                    ret_valid_i,    // a block given away is done
   input  tix_t                                    ret_tix_i
 );
@@ -74,6 +75,8 @@ module tsched_domain import tsched_pkg::*; #(
   localparam int unsigned T     = DomTaskDepth;
   localparam int unsigned C     = ChunksPerGroup;
   localparam int unsigned TickW = ChunkW + 1;
+  // Chunks in flight per group DMA engine: never more than a load has, so that the count fits TickW bits.
+  localparam int unsigned InFlight = (DmaInFlight < C) ? ((DmaInFlight > 0) ? DmaInFlight : 1) : C;
   localparam int unsigned DecW  = $clog2(G + 2);
 
   // -------------------------------------------------------------------------------------------
@@ -118,7 +121,7 @@ module tsched_domain import tsched_pkg::*; #(
       ld_cdone_d  = '0;
       ld_prog_d   = '0;
     end
-    for (int unsigned g = 0; g < G; g++) ld_full_d[g] = (ld_issued_d[g] - ld_cdone_d[g]) == TickW'(DmaInFlight);
+    for (int unsigned g = 0; g < G; g++) ld_full_d[g] = (ld_issued_d[g] - ld_cdone_d[g]) == TickW'(InFlight);
   end
 
   always_comb begin
@@ -378,7 +381,8 @@ module tsched_domain import tsched_pkg::*; #(
   for (genvar g = 0; g < G; g++) begin : gen_r_own
     for (genvar c = 0; c < NumCls; c++) begin : gen_c
       assign r_urg[g * NumCls + c] = urg[g][c] & has_own[c];
-      assign r_pre[g * NumCls + c] = pre[g][c] & has_own[c];
+      // No block is prepared in advance for a class another domain wants: it could not be given away.
+      assign r_pre[g * NumCls + c] = pre[g][c] & has_own[c] & ~(BalEn & BalHold & wanted_i[c]);
     end
   end
 

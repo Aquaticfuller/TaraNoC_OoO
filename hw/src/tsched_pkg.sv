@@ -216,6 +216,10 @@ package tsched_pkg;
   localparam int unsigned BorDepth =
 `ifdef TSCHED_BOR_DEPTH `TSCHED_BOR_DEPTH `else 2 `endif;
   localparam int unsigned WantW    = $clog2(GroupsPerDomain + 1);
+  // A domain does not fill next-block registers in advance for a class that a domain within reach wants
+  // (tsched_balance, wanted). 0 only to measure what the rule brings.
+  localparam bit          BalHold  =
+`ifdef TSCHED_BAL_HOLD `TSCHED_BAL_HOLD `else 1'b1 `endif;
 
   typedef struct packed {
     logic [NumCls-1:0][WantW-1:0] want;

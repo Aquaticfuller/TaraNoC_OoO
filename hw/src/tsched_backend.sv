@@ -49,6 +49,7 @@ module tsched_backend import tsched_pkg::*; #(
   output blk_t                      bblk_o,
   input  logic     [NumDomains-1:0] bpop_valid_i,
   input  logic     [NumDomains-1:0] bpop_cls_i,
+  output logic     [NumDomains-1:0][NumCls-1:0] wanted_o,   // a domain within reach wants the class
   output logic     [NumDomains-1:0] ret_valid_o,    // a block that a domain gave away is done
   output tix_t                      ret_tix_o,
   // no task in the window
@@ -401,7 +402,8 @@ module tsched_backend import tsched_pkg::*; #(
     .bblk_valid_o,
     .bblk_o,
     .bpop_valid_i,
-    .bpop_cls_i
+    .bpop_cls_i,
+    .wanted_o
   );
 
 `ifndef TARGET_SYNTHESIS

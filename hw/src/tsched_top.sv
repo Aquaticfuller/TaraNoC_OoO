@@ -50,6 +50,7 @@ module tsched_top import tsched_pkg::*; #(
   blk_t                       be_bblk;
   blk_t      [NumDomains-1:0] cl_bblk;
   logic      [NumDomains-1:0] be_bpop_valid, be_bpop_cls, cl_bpop_valid, cl_bpop_cls;
+  logic      [NumDomains-1:0][NumCls-1:0] be_wanted, cl_wanted;
   logic      [NumDomains-1:0] be_ret_valid, cl_ret_valid;
   tix_t                       be_ret_tix;
   tix_t      [NumDomains-1:0] cl_ret_tix;
@@ -84,6 +85,7 @@ module tsched_top import tsched_pkg::*; #(
     .bblk_o       (be_bblk),
     .bpop_valid_i (be_bpop_valid),
     .bpop_cls_i   (be_bpop_cls),
+    .wanted_o     (be_wanted),
     .ret_valid_o  (be_ret_valid),
     .ret_tix_o    (be_ret_tix),
     .idle_o
@@ -111,6 +113,7 @@ module tsched_top import tsched_pkg::*; #(
     rblk_t     rblk_p [LinkStages+1];
     logic      bpop_v [LinkStages+1];
     logic      bpop_c [LinkStages+1];
+    logic [NumCls-1:0] want_p [LinkStages+1];
 
     assign run_v[0]  = be_run_valid[d];
     assign run_p[0]  = be_run;
@@ -127,6 +130,7 @@ module tsched_top import tsched_pkg::*; #(
     assign rblk_p[0] = cl_rblk[d];
     assign bpop_v[0] = cl_bpop_valid[d];
     assign bpop_c[0] = cl_bpop_cls[d];
+    assign want_p[0] = be_wanted[d];
 
     for (genvar s = 0; s < LinkStages; s++) begin : gen_stage
       always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -139,6 +143,7 @@ module tsched_top import tsched_pkg::*; #(
           rblk_v[s+1] <= 1'b0;
           bpop_v[s+1] <= 1'b0;
           rep_p[s+1]  <= '0;
+          want_p[s+1] <= '0;
         end else begin
           run_v[s+1]  <= run_v[s];
           load_v[s+1] <= load_v[s];
@@ -148,6 +153,7 @@ module tsched_top import tsched_pkg::*; #(
           rblk_v[s+1] <= rblk_v[s];
           bpop_v[s+1] <= bpop_v[s];
           rep_p[s+1]  <= rep_p[s];
+          want_p[s+1] <= want_p[s];
         end
       end
       always_ff @(posedge clk_i) begin
@@ -189,6 +195,7 @@ module tsched_top import tsched_pkg::*; #(
     assign be_rblk[d]       = rblk_p[LinkStages];
     assign be_bpop_valid[d] = bpop_v[LinkStages];
     assign be_bpop_cls[d]   = bpop_c[LinkStages];
+    assign cl_wanted[d]     = want_p[LinkStages];
 
     assign done_v[0]         = cl_done_valid[d];
     assign done_p[0]         = cl_done[d];
@@ -220,6 +227,7 @@ module tsched_top import tsched_pkg::*; #(
     .bblk_i       (cl_bblk),
     .bpop_valid_o (cl_bpop_valid),
     .bpop_cls_o   (cl_bpop_cls),
+    .wanted_i     (cl_wanted),
     .ret_valid_i  (cl_ret_valid),
     .ret_tix_i    (cl_ret_tix),
     .dma_valid_o,

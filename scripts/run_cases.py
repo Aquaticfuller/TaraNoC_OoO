@@ -9,6 +9,7 @@ and through the RTL testbench, once with blocks free to run in neighbour domains
 domain that holds their weights. One simulation runs at a time.
 
 usage: run_cases.py <json_out> [case ...]      case = kind:n:regime, default: the list below
+       EXTRA_DEFS="+define+..." in the environment adds defines to both builds (separate build directories)
 """
 import json
 import os
@@ -21,8 +22,10 @@ ROOT = os.path.join(HERE, '..')
 SIM = os.path.join(ROOT, 'sim')
 CASES = ['decode:1:x4', 'sessions:16:x4', 'midfill:64:x4', 'midfill:64:x1', 'midfill:256:x1', 'midfill:1024:x1']
 SLOTS = 2
-BUILDS = {False: ('full_s2', '+define+TSCHED_SLOTS_PER_DOMAIN=%d' % SLOTS),
-          True: ('full_s2_bound', '+define+TSCHED_SLOTS_PER_DOMAIN=%d +define+TB_NO_LEND' % SLOTS)}
+EXTRA = os.environ.get('EXTRA_DEFS', '')
+TAG = ('_' + ''.join(c if c.isalnum() else '_' for c in EXTRA.replace('+define+', ''))).rstrip('_') if EXTRA else ''
+BUILDS = {False: ('full_s2' + TAG, ('+define+TSCHED_SLOTS_PER_DOMAIN=%d ' % SLOTS) + EXTRA),
+          True: ('full_s2_bound' + TAG, ('+define+TSCHED_SLOTS_PER_DOMAIN=%d +define+TB_NO_LEND ' % SLOTS) + EXTRA)}
 
 
 def sh(cmd, **kw):

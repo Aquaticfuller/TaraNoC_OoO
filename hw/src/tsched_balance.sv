@@ -21,6 +21,10 @@
 // wants), and the room in its queue for blocks of other domains (BorDepth). Both are given back when the
 // block leaves that queue for a group, or when the giving domain had nothing.
 //
+// The balancer also tells every domain, per class, whether a domain within BalReach steps wants blocks
+// (wanted). A domain then does not fill next-block registers in advance for that class: a block held in
+// such a register cannot be given away any more, and would wait for an own PE while PEs next door idle.
+//
 // The distance limit keeps a block near the data it reads: L1 is shared, so any PE can run the block,
 // but a far PE is slower, and a long block that runs far away ends its task late.
 
@@ -42,7 +46,9 @@ module tsched_balance import tsched_pkg::*; #(
   output blk_t                   bblk_o,
   // a block left the queue of a receiving domain
   input  logic  [NumDomains-1:0] bpop_valid_i,
-  input  logic  [NumDomains-1:0] bpop_cls_i
+  input  logic  [NumDomains-1:0] bpop_cls_i,
+  // per domain and class: a domain within reach wants blocks of the class
+  output logic  [NumDomains-1:0][NumCls-1:0] wanted_o
 );
 
   localparam int unsigned N    = NumDomains;
@@ -76,6 +82,24 @@ module tsched_balance import tsched_pkg::*; #(
     for (genvar h = 0; h < N; h++) begin : gen_h
       assign give_vec[c][h] = rep_i[h].give[c];
     end
+  end
+
+  // Wanted: any domain within reach (not the domain itself) reports want for the class. Registered.
+  logic [NumCls-1:0][N-1:0] want_vec;
+  logic [N-1:0][NumCls-1:0] wanted_d;
+  for (genvar c = 0; c < NumCls; c++) begin : gen_wv
+    for (genvar h = 0; h < N; h++) begin : gen_h
+      assign want_vec[c][h] = rep_i[h].want[c] != '0;
+    end
+  end
+  for (genvar d = 0; d < N; d++) begin : gen_wanted
+    for (genvar c = 0; c < NumCls; c++) begin : gen_c
+      assign wanted_d[d][c] = BalEn & (|(want_vec[c] & (Near[d] | Far[d])));
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) wanted_o <= '0;
+    else         wanted_o <= wanted_d;
   end
 
   // -------------------------------------------------------------------------------------------
