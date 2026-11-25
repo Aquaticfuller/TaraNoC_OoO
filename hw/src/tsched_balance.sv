@@ -84,12 +84,13 @@ module tsched_balance import tsched_pkg::*; #(
     end
   end
 
-  // Wanted: any domain within reach (not the domain itself) reports want for the class. Registered.
+  // Wanted: any domain within reach (not the domain itself) wants more blocks of the class than are
+  // already on their way to it. Registered.
   logic [NumCls-1:0][N-1:0] want_vec;
   logic [N-1:0][NumCls-1:0] wanted_d;
   for (genvar c = 0; c < NumCls; c++) begin : gen_wv
     for (genvar h = 0; h < N; h++) begin : gen_h
-      assign want_vec[c][h] = rep_i[h].want[c] != '0;
+      assign want_vec[c][h] = rep_i[h].want[c] > infl_q[h][c];
     end
   end
   for (genvar d = 0; d < N; d++) begin : gen_wanted
