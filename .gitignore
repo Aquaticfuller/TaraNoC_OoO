@@ -1,0 +1,27 @@
+# local notes, logs, results and private data: never committed
+WORK_NOTES.md
+tmp/
+moe_study/
+sysmodel/ref/
+sysmodel/page/
+sysmodel/README.md
+arch/*.png
+arch/*.drawio
+*.log
+__pycache__/
+*.pyc
+
+# Bender and build products
+.bender/
+sim/build/
+sim/work*/
+sim/prog/
+syn/build/
+*.fsdb
+*.vcd
+*.vpd
+*.wlf
+csrc/
+simv*
+ucli.key
+transcript
