@@ -9,6 +9,8 @@
 //                              -> run issue queue -> select    -> task port of a domain
 //   completions of the domains -> one per cycle -> window, wake-up, credits
 //   handle file                -> releases a handle and its slot when its last user is done
+//   balancer                   -> moves single blocks from domains with waiting blocks to domains with
+//                                 idle PEs (see tsched_balance)
 //
 // One task instruction is renamed, one load and one run are issued, one completion is taken and one
 // task retires per cycle. Tasks run for hundreds of cycles, so these rates are far above what the
@@ -18,7 +20,9 @@
 // DomTaskDepth tasks (credits) and streams one load at a time. The links can therefore be pipelined
 // freely. Completions return with valid/ready.
 
-module tsched_backend import tsched_pkg::*; (
+module tsched_backend import tsched_pkg::*; #(
+  parameter bit BalEn = 1'b1
+) (
   input  logic                      clk_i,
   input  logic                      rst_ni,
   // task instructions from the host, in program order and no longer speculative
@@ -35,6 +39,18 @@ module tsched_backend import tsched_pkg::*; (
   input  logic     [NumDomains-1:0] done_valid_i,
   output logic     [NumDomains-1:0] done_ready_o,
   input  done_t    [NumDomains-1:0] done_i,
+  // balancing: reports, give commands, answers, blocks for other domains, queue credits, returns
+  input  rep_t     [NumDomains-1:0] rep_i,
+  output logic     [NumDomains-1:0] give_valid_o,
+  output give_t                     give_o,
+  input  logic     [NumDomains-1:0] rblk_valid_i,
+  input  rblk_t    [NumDomains-1:0] rblk_i,
+  output logic     [NumDomains-1:0] bblk_valid_o,
+  output blk_t                      bblk_o,
+  input  logic     [NumDomains-1:0] bpop_valid_i,
+  input  logic     [NumDomains-1:0] bpop_cls_i,
+  output logic     [NumDomains-1:0] ret_valid_o,    // a block that a domain gave away is done
+  output tix_t                      ret_tix_o,
   // no task in the window
   output logic                      idle_o
 );
@@ -125,7 +141,7 @@ module tsched_backend import tsched_pkg::*; (
     .wid_o         (win_wid),
     .alloc_valid_i (win_alloc_valid),
     .alloc_i       (win_alloc),
-    .done_valid_i  (dn_valid_q),
+    .done_valid_i  (dn_valid_q & ~dn_q.is_ret),
     .done_wid_i    (dn_q.wid),
     .done_pd_v_o   (dn_pd_v),
     .done_pd_o     (dn_pd),
@@ -183,7 +199,7 @@ module tsched_backend import tsched_pkg::*; (
 
   logic run_done;          // a run finished in domain dn_src_q
   logic load_done;         // a load finished in domain dn_src_q
-  assign run_done  = dn_valid_q & ~dn_q.is_load & (dn_src_q != DnW'(NumDomains));
+  assign run_done  = dn_valid_q & ~dn_q.is_load & ~dn_q.is_ret & (dn_src_q != DnW'(NumDomains));
   assign load_done = dn_valid_q &  dn_q.is_load;
 
   always_comb begin
@@ -319,7 +335,7 @@ module tsched_backend import tsched_pkg::*; (
 
   assign arb_req               = {join_valid, done_valid_i};
   assign arb_data[NumDn-2:0]   = done_i;
-  assign arb_data[NumDn-1]     = '{wid: join_wid, is_load: 1'b0, nblk: '0};
+  assign arb_data[NumDn-1]     = '{wid: join_wid, is_load: 1'b0, is_ret: 1'b0, nblk: '0, dom: '0, tix: '0};
   assign done_ready_o          = arb_gnt[NumDn-2:0];
   assign join_ready            = arb_gnt[NumDn-1];
 
@@ -347,12 +363,17 @@ module tsched_backend import tsched_pkg::*; (
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       dn_valid_q <= 1'b0;
+      ret_valid_o <= '0;
       wake_v_q   <= 1'b0;
       rdec_v_q   <= 1'b0;
     end else begin
       dn_valid_q <= arb_valid;
-      wake_v_q   <= dn_valid_q & dn_pd_v;
-      rdec_v_q   <= dn_valid_q & dn_s1_v;
+      wake_v_q   <= dn_valid_q & ~dn_q.is_ret & dn_pd_v;
+      rdec_v_q   <= dn_valid_q & ~dn_q.is_ret & dn_s1_v;
+      // A block run for another domain: its completion goes on to the domain that holds the task.
+      for (int unsigned d = 0; d < NumDomains; d++) begin
+        ret_valid_o[d] <= dn_valid_q & dn_q.is_ret & (dn_q.dom == dom_t'(d));
+      end
     end
   end
 
@@ -360,8 +381,28 @@ module tsched_backend import tsched_pkg::*; (
     dn_q       <= arb_out;
     dn_src_q   <= arb_idx;
     wake_tag_q <= dn_pd;
+    ret_tix_o  <= dn_q.tix;
     rdec_q     <= dn_s1;
   end
+
+  // -------------------------------------------------------------------------------------------
+  // Balancing between domains
+  // -------------------------------------------------------------------------------------------
+  tsched_balance #(
+    .BalEn (BalEn)
+  ) i_balance (
+    .clk_i,
+    .rst_ni,
+    .rep_i,
+    .give_valid_o,
+    .give_o,
+    .rblk_valid_i,
+    .rblk_i,
+    .bblk_valid_o,
+    .bblk_o,
+    .bpop_valid_i,
+    .bpop_cls_i
+  );
 
 `ifndef TARGET_SYNTHESIS
   // pragma translate_off

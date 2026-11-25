@@ -20,16 +20,17 @@ schedulers cut them into blocks and hand the blocks to idle PEs.
 
 | Module | Role |
 |---|---|
-| `tsched_backend` | Cluster level: rename, window, handle file, load placement, run issue queue and port select |
+| `tsched_backend` | Cluster level: rename, window, handle file, load placement, run issue queue, completions, balancer |
 | `tsched_rename` | Handle rename and free list, in a map stage and a dispatch stage |
 | `tsched_window` | Tasks in program order until they are done |
 | `tsched_handle_file` | State and lifetime of handles; releases a handle and its L1 slot when its last user is done |
 | `tsched_load_issue` | Loads in program order, each to the least loaded domain that can stream now |
 | `tsched_run_iq` | Runs wait for their handles; the oldest ready one goes to the domain that holds its data |
-| `tsched_domain` | Domain scheduler: block cutting, stream following, dispatch, lending to neighbours, join counters |
+| `tsched_domain` | Domain scheduler: block cutting, stream following, dispatch, join counters; gives blocks to and takes blocks from other domains on command of the cluster level |
+| `tsched_balance` | Balancer of the cluster level: moves single blocks from domains with waiting blocks to domains with idle PEs, at most `BalReach` steps apart |
 | `tsched_group_disp` | Group dispatcher: next-block register per PE class, PE start and completion |
 | `tsched_age_sel`, `tsched_rr_sel`, `tsched_argmin`, `tsched_first_oh`, `tsched_oh_mux` | Selects: oldest first, round robin with a one-hot grant, minimum search, first set bit, one-hot multiplexer |
-| `tsched_cluster`, `tsched_top` | Domain mesh, group dispatchers, registered links to the cluster level |
+| `tsched_cluster`, `tsched_top` | Domains, group dispatchers, registered links to the cluster level (no links between domains) |
 
 Sizes are in `hw/src/tsched_pkg.sv`; each can be overridden with a define.
 

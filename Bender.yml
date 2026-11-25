@@ -24,6 +24,7 @@ sources:
   - hw/src/tsched_load_issue.sv
   - hw/src/tsched_group_disp.sv
   - hw/src/tsched_domain.sv
+  - hw/src/tsched_balance.sv
   # Level 2
   - hw/src/tsched_backend.sv
   - hw/src/tsched_cluster.sv

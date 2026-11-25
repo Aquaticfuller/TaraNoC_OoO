@@ -27,7 +27,7 @@ module tb_tsched;
   localparam realtime     ClkPeriod  = 1ns;
   localparam int unsigned LinkStages =
 `ifdef TB_LINK_STAGES `TB_LINK_STAGES `else 2 `endif;
-  localparam bit          LendEn =
+  localparam bit          BalEn =
 `ifdef TB_NO_LEND 1'b0 `else 1'b1 `endif;
   localparam int unsigned LendMin =
 `ifdef TB_LEND_MIN `TB_LEND_MIN `else 1 `endif;
@@ -52,7 +52,7 @@ module tb_tsched;
 
   tsched_top #(
     .LinkStages (LinkStages),
-    .LendEn     (LendEn),
+    .BalEn      (BalEn),
     .LendMin    (LendMin)
   ) i_dut (
     .clk_i           (clk),

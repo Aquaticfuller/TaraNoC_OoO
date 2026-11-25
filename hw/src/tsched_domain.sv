@@ -20,15 +20,18 @@
 //           The decision is built so that everything it needs is prepared in parallel: the flags of the
 //           tasks are registers, each tier of requests has its own select with a one-hot grant, and the
 //           counters have both outcomes ready. See the comments at each part.
-// Lending   A domain whose idle PEs find no block asks one neighbour at a time. A neighbour hands out a
-//           block of its own tasks when none of its own idle PEs can take it. The completion of a lent
-//           block returns to the lender, which keeps the join counter.
+// Balance   The domain tells the cluster level how many groups have an idle PE and nothing to run, and
+//           whether it has blocks that no own PE can take now. On a give command of the cluster level it
+//           hands one block of its own tasks to another domain; the block travels through the cluster
+//           level. It runs blocks it receives from other domains before its own. The completion of such
+//           a block returns through the cluster level to the domain of the task, which keeps the join
+//           counter. There are no links between domains. L1 is shared: the PE reads the data of the
+//           block from the domain named in the block.
 
 module tsched_domain import tsched_pkg::*; #(
-  parameter int unsigned       DomId   = 0,
-  parameter logic [NumDir-1:0] NbMask  = '1,      // directions in which a neighbour exists
-  parameter bit                LendEn  = 1'b1,
-  parameter int unsigned       LendMin = 1        // eligible blocks a task must have left to lend one
+  parameter int unsigned DomId   = 0,
+  parameter bit          BalEn   = 1'b1,    // take part in the balancing by the cluster level
+  parameter int unsigned LendMin = 1        // eligible blocks a task must have left to give one away
 ) (
   input  logic                                    clk_i,
   input  logic                                    rst_ni,
@@ -53,27 +56,25 @@ module tsched_domain import tsched_pkg::*; #(
   input  logic     [GroupsPerDomain-1:0]          gdone_valid_i,
   output logic     [GroupsPerDomain-1:0]          gdone_ready_o,
   input  gdone_t   [GroupsPerDomain-1:0]          gdone_i,
-  // neighbours
-  output logic     [NumDir-1:0][NumCls-1:0]       nb_want_o,       // this domain asks for a block
-  input  logic     [NumDir-1:0][NumCls-1:0]       nb_want_i,
-  output logic     [NumDir-1:0]                   nb_blk_valid_o,  // blocks lent
-  input  logic     [NumDir-1:0]                   nb_blk_ready_i,
-  output blk_t     [NumDir-1:0]                   nb_blk_o,
-  input  logic     [NumDir-1:0]                   nb_blk_valid_i,  // blocks borrowed
-  output logic     [NumDir-1:0]                   nb_blk_ready_o,
-  input  blk_t     [NumDir-1:0]                   nb_blk_i,
-  output logic     [NumDir-1:0]                   nb_ret_valid_o,  // completions of borrowed blocks
-  input  logic     [NumDir-1:0]                   nb_ret_ready_i,
-  output tix_t     [NumDir-1:0]                   nb_ret_o,
-  input  logic     [NumDir-1:0]                   nb_ret_valid_i,  // completions of lent blocks, always taken
-  input  tix_t     [NumDir-1:0]                   nb_ret_i
+  // balancing by the cluster level
+  output rep_t                                    rep_o,          // idle PEs without work, blocks to give
+  input  logic                                    give_valid_i,   // hand one block to another domain
+  input  give_t                                   give_i,
+  output logic                                    rblk_valid_o,   // the answer, two cycles after the command
+  output rblk_t                                   rblk_o,
+  input  logic                                    bblk_valid_i,   // a block of another domain to run here
+  input  blk_t                                    bblk_i,
+  output logic                                    bpop_valid_o,   // such a block left the queue for a group
+  output logic                                    bpop_cls_o,
+  input  logic                                    ret_valid_i,    // a block given away is done
+  input  tix_t                                    ret_tix_i
 );
 
   localparam int unsigned G     = GroupsPerDomain;
   localparam int unsigned T     = DomTaskDepth;
   localparam int unsigned C     = ChunksPerGroup;
   localparam int unsigned TickW = ChunkW + 1;
-  localparam int unsigned DecW  = $clog2(G + NumDir + 1);
+  localparam int unsigned DecW  = $clog2(G + 2);
 
   // -------------------------------------------------------------------------------------------
   // Stream: one load at a time
@@ -333,45 +334,50 @@ module tsched_domain import tsched_pkg::*; #(
   end
 
   // The decision taken in the previous cycle.
-  logic              d_v_q;          // a block was decided
-  logic              d_bor_q;        // it is a borrowed block, passed on to a group
-  logic              d_nb_q;         // it is lent to a neighbour
-  logic [G-1:0]      d_goh_q;        // group that gets it, one-hot
-  logic              d_cls_q;
-  logic [NumDir-1:0] d_doh_q;        // direction it is lent to or was borrowed from, one-hot
-  logic [T-1:0]      d_oh_q;         // task it is cut from, one-hot
-  blk_t              d_bblk_q;       // the borrowed block
+  logic         d_v_q;          // a decision was taken
+  logic         d_give_q;       // it answers a give command (also when there was no block to give)
+  logic         d_bor_q;        // it passes a block of another domain on to a group
+  logic [G-1:0] d_goh_q;        // group that gets the block, one-hot
+  logic         d_cls_q;
+  dom_t         d_rcv_q;        // give: the domain that receives the block
+  logic [T-1:0] d_oh_q;         // task the block is cut from, one-hot; zero for a block of another domain
+  blk_t         d_bblk_q;       // the block of another domain
 
-  // A lent block waits in a register per direction. A new block is decided for a direction only when
-  // that register is empty and no block is on its way into it. The ready of the neighbour is not used
-  // here, so no path runs from one domain's decision through the neighbour into the next decision.
-  logic [NumDir-1:0] lend_v_d, lend_v_q;
-  blk_t [NumDir-1:0] lend_q;
-  logic [NumDir-1:0] lend_free;
-  assign lend_free      = ~lend_v_q & ~({NumDir{d_v_q & d_nb_q}} & d_doh_q);
-  assign nb_blk_valid_o = lend_v_q;
-  assign nb_blk_o       = lend_q;
+  // Blocks of other domains wait in a short queue until a next-block register of their class is empty.
+  // The cluster level sends a block only while it holds a credit for this queue.
+  logic bor_empty, bor_full, bor_pop;
+  blk_t bor_head;
 
-  // Three tiers of requests: own registers with an idle PE, neighbours, own registers that prepare the
-  // next block. Each tier has its own round-robin select; all three run in parallel and the tier is
-  // chosen last.
+  fifo_v3 #(
+    .FALL_THROUGH (1'b0),
+    .DEPTH        (BorDepth),
+    .dtype        (blk_t)
+  ) i_bor (
+    .clk_i,
+    .rst_ni,
+    .flush_i    (1'b0),
+    .testmode_i (1'b0),
+    .full_o     (bor_full),
+    .empty_o    (bor_empty),
+    .usage_o    (/* unused */),
+    .data_i     (bblk_i),
+    .push_i     (bblk_valid_i),
+    .data_o     (bor_head),
+    .pop_i      (bor_pop)
+  );
+
+  // Two tiers of own requests: registers with an idle PE, registers that prepare the next block. Each
+  // tier has its own round-robin select; both run in parallel and the tier is chosen last.
   localparam int unsigned NumOwn = G * NumCls;
-  localparam int unsigned NumNb  = NumDir * NumCls;
 
   logic [NumOwn-1:0] r_urg, r_pre, g_urg, g_pre;
-  logic [NumNb-1:0]  r_nb, g_nb;
-  logic              any_urg, any_nb, any_pre;
-  logic              sel_b, sel_u, sel_n, sel_p;
+  logic              any_urg, any_pre;
+  logic              sel_g, sel_b, sel_u, sel_p;
 
   for (genvar g = 0; g < G; g++) begin : gen_r_own
     for (genvar c = 0; c < NumCls; c++) begin : gen_c
       assign r_urg[g * NumCls + c] = urg[g][c] & has_own[c];
       assign r_pre[g * NumCls + c] = pre[g][c] & has_own[c];
-    end
-  end
-  for (genvar d = 0; d < NumDir; d++) begin : gen_r_nb
-    for (genvar c = 0; c < NumCls; c++) begin : gen_c
-      assign r_nb[d * NumCls + c] = LendEn & NbMask[d] & nb_want_i[d][c] & has_lend[c] & lend_free[d];
     end
   end
 
@@ -384,15 +390,6 @@ module tsched_domain import tsched_pkg::*; #(
     .gnt_o  (g_urg)
   );
 
-  tsched_rr_sel #(.N (NumNb)) i_sel_nb (
-    .clk_i,
-    .rst_ni,
-    .req_i  (r_nb),
-    .take_i (sel_n),
-    .any_o  (any_nb),
-    .gnt_o  (g_nb)
-  );
-
   tsched_rr_sel #(.N (NumOwn)) i_sel_pre (
     .clk_i,
     .rst_ni,
@@ -402,14 +399,12 @@ module tsched_domain import tsched_pkg::*; #(
     .gnt_o  (g_pre)
   );
 
-  // Borrowed blocks go first: they are only requested when the own tasks had nothing for that class.
-  // Per class, the group that takes one: the first with an idle PE, else the first empty register.
+  // A block of another domain: the group that takes it is the first with an idle PE of its class, else
+  // the first with an empty register.
   logic [NumCls-1:0][G-1:0] b_pick;
   logic [NumCls-1:0]        b_room;
-  logic [NumDir-1:0]        b_can, b_doh;
-  logic                     b_cls;
+  logic                     b_any, b_cls;
   logic [G-1:0]             b_goh;
-  blk_t                     b_blk;
 
   always_comb begin
     for (int unsigned c = 0; c < NumCls; c++) begin
@@ -425,55 +420,47 @@ module tsched_domain import tsched_pkg::*; #(
       b_pick[c] = (|u) ? u_first : e_first;
       b_room[c] = |e;
     end
-    for (int unsigned d = 0; d < NumDir; d++) begin
-      b_can[d] = nb_blk_valid_i[d] & b_room[nb_blk_i[d].pcls];
-    end
-    b_cls = 1'b0;
-    b_blk = '0;
-    for (int unsigned d = 0; d < NumDir; d++) begin
-      b_doh[d] = b_can[d] & ~(|(b_can & NumDir'((32'd1 << d) - 32'd1)));
-      b_cls   |= b_doh[d] & nb_blk_i[d].pcls;
-      b_blk   |= {$bits(blk_t){b_doh[d]}} & nb_blk_i[d];
-    end
-    b_goh = b_pick[b_cls];
   end
+  assign b_cls = bor_head.pcls;
+  assign b_any = ~bor_empty & b_room[b_cls];
+  assign b_goh = b_pick[b_cls];
 
-  assign sel_b          = |b_can;
-  assign sel_u          = ~sel_b & any_urg;
-  assign sel_n          = ~sel_b & ~any_urg & any_nb;
-  assign sel_p          = ~sel_b & ~any_urg & ~any_nb & any_pre;
-  assign nb_blk_ready_o = b_doh;
+  // One decision per cycle, in this order:
+  //   give  a give command of the cluster level: one block of the oldest task that can spare one leaves
+  //         for another domain. It goes first so that the answer returns after a fixed number of cycles.
+  //   b     a block of another domain goes to a group (it was asked for because own tasks had nothing)
+  //   u     an own block for a register with an idle PE
+  //   p     an own block for a register that prepares the next block
+  logic [T-1:0] k_give;
+  assign k_give = (BalEn && has_lend[give_i.cls]) ? sel_gnt[NumCls + 32'(give_i.cls)] : '0;
+
+  assign sel_g   = give_valid_i;
+  assign sel_b   = ~sel_g & b_any;
+  assign sel_u   = ~sel_g & ~b_any & any_urg;
+  assign sel_p   = ~sel_g & ~b_any & ~any_urg & any_pre;
+  assign bor_pop = sel_b;
 
   // Per tier: the class of the winner and the task its block is cut from (the grants are one-hot).
-  logic [NumCls-1:0] c_urg, c_nb, c_pre;
-  logic [T-1:0]      k_urg, k_nb, k_pre;
-  logic [NumDir-1:0] n_doh;
+  logic [NumCls-1:0] c_urg, c_pre;
+  logic [T-1:0]      k_urg, k_pre;
   always_comb begin
     c_urg = '0;
-    c_nb  = '0;
     c_pre = '0;
-    n_doh = '0;
     for (int unsigned c = 0; c < NumCls; c++) begin
       for (int unsigned g = 0; g < G; g++) begin
         c_urg[c] |= g_urg[g * NumCls + c];
         c_pre[c] |= g_pre[g * NumCls + c];
       end
-      for (int unsigned d = 0; d < NumDir; d++) begin
-        c_nb[c]  |= g_nb[d * NumCls + c];
-        n_doh[d] |= g_nb[d * NumCls + c];
-      end
     end
     k_urg = '0;
-    k_nb  = '0;
     k_pre = '0;
     for (int unsigned c = 0; c < NumCls; c++) begin
       k_urg |= {T{c_urg[c]}} & sel_gnt[c];
       k_pre |= {T{c_pre[c]}} & sel_gnt[c];
-      k_nb  |= {T{c_nb[c]}}  & sel_gnt[NumCls + c];
     end
   end
 
-  assign cut_oh = ({T{sel_u}} & k_urg) | ({T{sel_n}} & k_nb) | ({T{sel_p}} & k_pre);
+  assign cut_oh = ({T{sel_g}} & k_give) | ({T{sel_u}} & k_urg) | ({T{sel_p}} & k_pre);
 
   // The next-block register that gets a block, one-hot over group and class.
   logic [G-1:0][NumCls-1:0] send_oh;
@@ -488,7 +475,7 @@ module tsched_domain import tsched_pkg::*; #(
       end
       send_goh[g] = |send_oh[g];
     end
-    send_cls = (sel_b & b_cls) | (sel_u & c_urg[NumCls-1]) | (sel_n & c_nb[NumCls-1]) | (sel_p & c_pre[NumCls-1]);
+    send_cls = (sel_g & give_i.cls) | (sel_b & b_cls) | (sel_u & c_urg[NumCls-1]) | (sel_p & c_pre[NumCls-1]);
   end
 
   // -------------------------------------------------------------------------------------------
@@ -496,10 +483,9 @@ module tsched_domain import tsched_pkg::*; #(
   // -------------------------------------------------------------------------------------------
   // The block of the previous cycle's decision, read from the task table. The counter of the task has
   // moved on by one since the decision, so the index of the block is that counter minus one.
-  blk_t   asm_blk;
-  gblk_t  out_blk;
-  nblk_t  asm_next;
-  owner_t d_owner;
+  blk_t  asm_blk;
+  gblk_t out_blk;
+  nblk_t asm_next;
   always_comb begin
     asm_blk  = '0;
     asm_next = '0;
@@ -517,29 +503,26 @@ module tsched_domain import tsched_pkg::*; #(
     asm_blk.bidx = asm_next - nblk_t'(1);
     asm_blk.dom  = dom_t'(DomId);
     asm_blk.pcls = d_cls_q;
-    d_owner = '0;
-    for (int unsigned d = 0; d < NumDir; d++) begin
-      if (d_doh_q[d]) d_owner = owner_t'(d + 1);
-    end
   end
-  assign out_blk = d_bor_q ? '{owner: d_owner, b: d_bblk_q} : '{owner: '0, b: asm_blk};
+  assign out_blk = d_bor_q ? '{bor: 1'b1, b: d_bblk_q} : '{bor: 1'b0, b: asm_blk};
 
-  assign gcred_d  = (gcred_q | pop_i) & ~send_oh;
-  assign lend_v_d = (lend_v_q & ~nb_blk_ready_i) | ({NumDir{d_v_q & d_nb_q}} & d_doh_q);
+  assign gcred_d = (gcred_q | pop_i) & ~send_oh;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      d_v_q       <= 1'b0;
-      d_nb_q      <= 1'b0;
-      blk_valid_o <= '0;
-      gcred_q     <= '1;
-      lend_v_q    <= '0;
+      d_v_q        <= 1'b0;
+      d_give_q     <= 1'b0;
+      blk_valid_o  <= '0;
+      rblk_valid_o <= 1'b0;
+      bpop_valid_o <= 1'b0;
+      gcred_q      <= '1;
     end else begin
-      d_v_q       <= sel_b | sel_u | sel_n | sel_p;
-      d_nb_q      <= sel_n;
-      blk_valid_o <= {G{d_v_q & ~d_nb_q}} & d_goh_q;
-      gcred_q     <= gcred_d;
-      lend_v_q    <= lend_v_d;
+      d_v_q        <= sel_g | sel_b | sel_u | sel_p;
+      d_give_q     <= sel_g;
+      blk_valid_o  <= {G{d_v_q & ~d_give_q}} & d_goh_q;
+      rblk_valid_o <= d_v_q & d_give_q;
+      bpop_valid_o <= sel_b;
+      gcred_q      <= gcred_d;
     end
   end
 
@@ -547,157 +530,125 @@ module tsched_domain import tsched_pkg::*; #(
     d_bor_q <= sel_b;
     d_goh_q <= send_goh;
     d_cls_q <= send_cls;
-    d_doh_q <= sel_b ? b_doh : n_doh;
     d_oh_q  <= cut_oh;
-    if (sel_b) d_bblk_q <= b_blk;
+    if (sel_g) d_rcv_q  <= give_i.rcv;
+    if (sel_b) d_bblk_q <= bor_head;
+    bpop_cls_o <= b_cls;
     for (int unsigned g = 0; g < G; g++) begin
-      if (d_v_q && !d_nb_q && d_goh_q[g]) blk_o[g] <= out_blk;
+      if (d_v_q && !d_give_q && d_goh_q[g]) blk_o[g] <= out_blk;
     end
-    for (int unsigned d = 0; d < NumDir; d++) begin
-      if (d_v_q && d_nb_q && d_doh_q[d]) lend_q[d] <= asm_blk;
-    end
+    if (d_v_q && d_give_q) rblk_o <= '{ok: |d_oh_q, rcv: d_rcv_q, b: asm_blk};
   end
 
   // -------------------------------------------------------------------------------------------
-  // Borrowing: ask one neighbour at a time, the next one every four cycles
+  // Report to the cluster level
   // -------------------------------------------------------------------------------------------
-  logic [NumCls-1:0] starve;
-  logic [1:0]        ask_dir_q;
-  logic [1:0]        ask_cnt_q;
-
+  // want: groups with an idle PE of the class, an empty register, and no own block for that class.
+  // give: a task can spare a block for the class and no own register with an idle PE waits for one.
+  rep_t rep_d;
   always_comb begin
+    rep_d = '0;
     for (int unsigned c = 0; c < NumCls; c++) begin
-      logic idle_c;
-      idle_c = 1'b0;
-      for (int unsigned g = 0; g < G; g++) idle_c |= urg[g][c];
-      starve[c] = ~has_own[c] & idle_c;
+      if (BalEn && !has_own[c]) begin
+        for (int unsigned g = 0; g < G; g++) rep_d.want[c] += WantW'(urg[g][c]);
+      end
+      rep_d.give[c] = BalEn & has_lend[c] & ~any_urg;
     end
   end
-
-  function automatic logic [1:0] next_dir(input logic [1:0] d);
-    logic [1:0] n;
-    n = d;
-    for (int unsigned k = NumDir; k >= 1; k--) begin
-      if (NbMask[2'(d + 2'(k))]) n = 2'(d + 2'(k));
-    end
-    return n;
-  endfunction
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      ask_dir_q <= '0;
-      ask_cnt_q <= '0;
-      nb_want_o <= '0;
+      rep_o <= '0;
     end else begin
-      ask_cnt_q <= (|starve) ? ask_cnt_q + 2'd1 : '0;
-      if (ask_cnt_q == 2'd3) ask_dir_q <= next_dir(ask_dir_q);
-      for (int unsigned d = 0; d < NumDir; d++) begin
-        nb_want_o[d] <= (LendEn && NbMask[d] && (ask_dir_q == 2'(d))) ? starve : '0;
-      end
+      rep_o <= rep_d;
     end
   end
 
   // -------------------------------------------------------------------------------------------
   // Completions of blocks
   // -------------------------------------------------------------------------------------------
-  logic [NumDir-1:0] ret_v_d, ret_v_q;
-  tix_t [NumDir-1:0] ret_d, ret_q;
-  logic [G-1:0]      gdone_self;
-  logic [G-1:0][NumDir-1:0] ret_want;   // a completion of a borrowed block, by the direction it returns to
-  logic [NumDir-1:0] ret_free;
+  // A completion of an own block is always taken. A completion of a block of another domain needs the
+  // return register, from which it leaves to the cluster level; among the groups the lowest wins.
+  logic         ret_v_d, ret_v_q;
+  dom_t         ret_dom_q;
+  tix_t         ret_tix_q;
+  logic         ret_take;       // the return moves to the output register
+  logic         ret_free;
+  logic [G-1:0] ret_want, ret_first;
 
-  assign nb_ret_valid_o = ret_v_q;
-  assign nb_ret_o       = ret_q;
-  assign ret_free       = ~ret_v_q | nb_ret_ready_i;
+  assign ret_free = ~ret_v_q | ret_take;
 
-  // A completion of an own block is always taken. A completion of a borrowed block needs the return
-  // register of its direction; among the groups that want one register the lowest wins. Who wins does
-  // not depend on whether the register is free, so the two are found in parallel.
   always_comb begin
-    ret_v_d = ret_v_q & ~nb_ret_ready_i;
-    ret_d   = ret_q;
     for (int unsigned g = 0; g < G; g++) begin
-      gdone_self[g] = gdone_i[g].owner == '0;
-      for (int unsigned d = 0; d < NumDir; d++) begin
-        ret_want[g][d] = gdone_valid_i[g] & (gdone_i[g].owner == owner_t'(d + 1));
-      end
+      ret_want[g] = gdone_valid_i[g] & gdone_i[g].bor;
     end
     for (int unsigned g = 0; g < G; g++) begin
-      logic [NumDir-1:0] first;
-      first = ret_want[g];
-      for (int unsigned k = 0; k < g; k++) first &= ~ret_want[k];
-      gdone_ready_o[g] = gdone_self[g] | (|(first & ret_free));
+      ret_first[g]     = ret_want[g] & ~(|(ret_want & G'((32'd1 << g) - 32'd1)));
+      gdone_ready_o[g] = ~gdone_i[g].bor | (ret_first[g] & ret_free);
     end
-    // The return registers: per direction a one-hot choice of the group.
-    for (int unsigned d = 0; d < NumDir; d++) begin
-      logic any;
-      tix_t tix;
-      any = 1'b0;
-      tix = '0;
-      for (int unsigned g = 0; g < G; g++) begin
-        logic first;
-        first = ret_want[g][d];
-        for (int unsigned k = 0; k < g; k++) first &= ~ret_want[k][d];
-        any |= first;
-        tix |= {TixW{first}} & gdone_i[g].tix;
-      end
-      if (any && ret_free[d]) begin
-        ret_v_d[d] = 1'b1;
-        ret_d[d]   = tix;
-      end
-    end
+    ret_v_d = (ret_v_q & ~ret_take) | ((|ret_want) & ret_free);
   end
 
   always_comb begin
     for (int unsigned t = 0; t < T; t++) begin
-      t_dec_d[t] = '0;
+      t_dec_d[t] = DecW'(ret_valid_i & (ret_tix_i == tix_t'(t)));
       for (int unsigned g = 0; g < G; g++) begin
-        t_dec_d[t] += DecW'(gdone_valid_i[g] & gdone_self[g] & (gdone_i[g].tix == tix_t'(t)));
-      end
-      for (int unsigned d = 0; d < NumDir; d++) begin
-        t_dec_d[t] += DecW'(nb_ret_valid_i[d] & (nb_ret_i[d] == tix_t'(t)));
+        t_dec_d[t] += DecW'(gdone_valid_i[g] & ~gdone_i[g].bor & (gdone_i[g].tix == tix_t'(t)));
       end
     end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      ret_v_q <= '0;
+      ret_v_q <= 1'b0;
     end else begin
       ret_v_q <= ret_v_d;
     end
   end
 
   always_ff @(posedge clk_i) begin
-    ret_q <= ret_d;
+    if ((|ret_want) && ret_free) begin
+      for (int unsigned g = 0; g < G; g++) begin
+        if (ret_first[g]) begin
+          ret_dom_q <= gdone_i[g].dom;
+          ret_tix_q <= gdone_i[g].tix;
+        end
+      end
+    end
   end
 
   // -------------------------------------------------------------------------------------------
-  // Completions to the cluster level: the load first, then the lowest finished task
+  // Completions to the cluster level: the load first, then a block run for another domain, then the
+  // lowest finished task
   // -------------------------------------------------------------------------------------------
   logic  done_v_d, done_v_q;
   done_t done_d, done_q;
-  logic  done_load;
+  logic  done_can, done_load;
 
   assign done_valid_o = done_v_q;
   assign done_o       = done_q;
+  assign done_can     = ~done_v_q | done_ready_i;
+  assign done_load    = done_can & ld_fin;
+  assign ld_take      = done_load;
+  assign ret_take     = done_can & ~ld_fin & ret_v_q;
 
   always_comb begin
-    done_load = (~done_v_q | done_ready_i) & ld_fin;
-    ld_take   = done_load;
-    t_take    = '0;
-    done_v_d  = done_v_q & ~done_ready_i;
-    done_d    = done_q;
+    t_take   = '0;
+    done_v_d = done_v_q & ~done_ready_i;
+    done_d   = done_q;
     if (done_load) begin
       done_v_d = 1'b1;
-      done_d   = '{wid: ld_wid_q, is_load: 1'b1, nblk: '0};
-    end else if (~done_v_q | done_ready_i) begin
+      done_d   = '{wid: ld_wid_q, is_load: 1'b1, is_ret: 1'b0, nblk: '0, dom: '0, tix: '0};
+    end else if (ret_take) begin
+      done_v_d = 1'b1;
+      done_d   = '{wid: '0, is_load: 1'b0, is_ret: 1'b1, nblk: '0, dom: ret_dom_q, tix: ret_tix_q};
+    end else if (done_can) begin
       for (int t = T - 1; t >= 0; t--) begin
         if (t_fin[t]) begin
-          t_take   = '0;
+          t_take    = '0;
           t_take[t] = 1'b1;
-          done_v_d = 1'b1;
-          done_d   = '{wid: t_wid_q[t], is_load: 1'b0, nblk: t_nblk_q[t]};
+          done_v_d  = 1'b1;
+          done_d    = '{wid: t_wid_q[t], is_load: 1'b0, is_ret: 1'b0, nblk: t_nblk_q[t], dom: '0, tix: '0};
         end
       end
     end
@@ -726,12 +677,17 @@ module tsched_domain import tsched_pkg::*; #(
       assert ($onehot0(cut_oh)) else $error("[tsched_domain %0d] block cut from two tasks", DomId);
       assert ($onehot0(send_oh)) else $error("[tsched_domain %0d] block sent to two registers", DomId);
       assert ((send_oh & ~gcred_q) == '0) else $error("[tsched_domain %0d] block sent to a full register", DomId);
-      assert ((sel_u | sel_n | sel_p) == (|cut_oh)) else $error("[tsched_domain %0d] decision without a task", DomId);
+      assert (!(sel_u | sel_p) || (|cut_oh)) else $error("[tsched_domain %0d] decision without a task", DomId);
+      assert (!(bblk_valid_i && bor_full)) else $error("[tsched_domain %0d] block of another domain without room", DomId);
+      assert (!(bblk_valid_i && (bblk_i.dom == dom_t'(DomId))))
+        else $error("[tsched_domain %0d] own block returned as a block of another domain", DomId);
       for (int unsigned t = 0; t < T; t++) begin
         assert (!(t_valid_q[t] && (32'(t_dec_q[t]) > 32'(t_out_q[t]))))
           else $error("[tsched_domain %0d] task %0d: more completions than blocks running", DomId, t);
         assert (!(cut_oh[t] && !t_avail_q[t]))
           else $error("[tsched_domain %0d] task %0d: block cut without an eligible one", DomId, t);
+        assert (!(ret_valid_i && (ret_tix_i == tix_t'(t)) && !t_valid_q[t]))
+          else $error("[tsched_domain %0d] completion of a given block for task %0d, which is not in the table", DomId, t);
       end
     end
   end

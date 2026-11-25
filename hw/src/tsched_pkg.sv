@@ -157,10 +157,14 @@ package tsched_pkg;
     addr_t addr;
   } load_req_t;
 
+  // A completion from a domain: a load, a task, or one block that the domain ran for another domain.
   typedef struct packed {
     wid_t  wid;
     logic  is_load;
+    logic  is_ret;   // a block of domain `dom`, task index `tix` there, is done
     nblk_t nblk;     // run: blocks of the finished task
+    dom_t  dom;
+    tix_t  tix;
   } done_t;
 
   // ---------------------------------------------------------------------------------------------
@@ -179,19 +183,49 @@ package tsched_pkg;
     logic  pcls;     // PE class the block was cut for (ClsT or ClsV)
   } blk_t;
 
-  // Who to tell when a block is done: 0 the PE's own domain, 1 + d the neighbour in direction d.
-  localparam int unsigned NumDir = 4;    // 0 north, 1 east, 2 south, 3 west
-  typedef logic [2:0] owner_t;
-
+  // A block as a group dispatcher gets it. `bor`: the block belongs to a task of another domain (b.dom),
+  // which must be told when it is done.
   typedef struct packed {
-    owner_t owner;
-    blk_t   b;
+    logic bor;
+    blk_t b;
   } gblk_t;
 
   typedef struct packed {
-    owner_t owner;
-    tix_t   tix;
+    logic bor;
+    dom_t dom;       // domain that holds the task
+    tix_t tix;       // task index in that domain
   } gdone_t;
+
+  // ---------------------------------------------------------------------------------------------
+  // Balancing by the cluster level
+  // ---------------------------------------------------------------------------------------------
+  // A domain reports, per PE class, how many of its groups have an idle PE and nothing to run (want) and
+  // whether it has blocks that no own PE can take now (give). The cluster level tells a domain that
+  // gives to hand one block to a domain that wants, at most BalReach steps away on the domain mesh. The
+  // block travels through the cluster level; there are no links between domains.
+  localparam int unsigned BalReach =
+`ifdef TSCHED_BAL_REACH `TSCHED_BAL_REACH `else 2 `endif;
+  // Blocks of other domains that a domain can hold before a next-block register takes them.
+  localparam int unsigned BorDepth = 4;
+  localparam int unsigned WantW    = $clog2(GroupsPerDomain + 1);
+
+  typedef struct packed {
+    logic [NumCls-1:0][WantW-1:0] want;
+    logic [NumCls-1:0]            give;
+  } rep_t;
+
+  // Give command: hand one block for PE class `cls` to domain `rcv`.
+  typedef struct packed {
+    logic cls;
+    dom_t rcv;
+  } give_t;
+
+  // Answer to a give command; ok is low when the domain had no block to give.
+  typedef struct packed {
+    logic ok;
+    dom_t rcv;
+    blk_t b;
+  } rblk_t;
 
   // One chunk of a load, to the DMA engine of a group.
   typedef struct packed {

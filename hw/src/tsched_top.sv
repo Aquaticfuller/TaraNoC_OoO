@@ -6,11 +6,12 @@
 //
 // LinkStages register stages sit on every link between the cluster level and a domain, to cover the
 // distance. The task and load links carry valid and data only (the cluster level counts credits); the
-// completion links use spill registers.
+// completion links use spill registers. The links of the balancer (reports, give commands, answers,
+// blocks, queue credits, returns) carry valid and data only and have the same number of stages.
 
 module tsched_top import tsched_pkg::*; #(
   parameter int unsigned LinkStages = 1,
-  parameter bit          LendEn     = 1'b1,
+  parameter bit          BalEn      = 1'b1,
   parameter int unsigned LendMin    = 1
 ) (
   input  logic                                  clk_i,
@@ -38,13 +39,30 @@ module tsched_top import tsched_pkg::*; #(
   logic      [NumDomains-1:0] be_done_valid, be_done_ready;
   done_t     [NumDomains-1:0] be_done;
 
+  // balancing: be_* at the cluster level, cl_* at the domains
+  rep_t      [NumDomains-1:0] be_rep, cl_rep;
+  logic      [NumDomains-1:0] be_give_valid, cl_give_valid;
+  give_t                      be_give;
+  give_t     [NumDomains-1:0] cl_give;
+  logic      [NumDomains-1:0] be_rblk_valid, cl_rblk_valid;
+  rblk_t     [NumDomains-1:0] be_rblk, cl_rblk;
+  logic      [NumDomains-1:0] be_bblk_valid, cl_bblk_valid;
+  blk_t                       be_bblk;
+  blk_t      [NumDomains-1:0] cl_bblk;
+  logic      [NumDomains-1:0] be_bpop_valid, be_bpop_cls, cl_bpop_valid, cl_bpop_cls;
+  logic      [NumDomains-1:0] be_ret_valid, cl_ret_valid;
+  tix_t                       be_ret_tix;
+  tix_t      [NumDomains-1:0] cl_ret_tix;
+
   logic      [NumDomains-1:0] cl_run_valid, cl_load_valid;
   run_req_t  [NumDomains-1:0] cl_run;
   load_req_t [NumDomains-1:0] cl_load;
   logic      [NumDomains-1:0] cl_done_valid, cl_done_ready;
   done_t     [NumDomains-1:0] cl_done;
 
-  tsched_backend i_backend (
+  tsched_backend #(
+    .BalEn (BalEn)
+  ) i_backend (
     .clk_i,
     .rst_ni,
     .instr_valid_i,
@@ -57,6 +75,17 @@ module tsched_top import tsched_pkg::*; #(
     .done_valid_i (be_done_valid),
     .done_ready_o (be_done_ready),
     .done_i       (be_done),
+    .rep_i        (be_rep),
+    .give_valid_o (be_give_valid),
+    .give_o       (be_give),
+    .rblk_valid_i (be_rblk_valid),
+    .rblk_i       (be_rblk),
+    .bblk_valid_o (be_bblk_valid),
+    .bblk_o       (be_bblk),
+    .bpop_valid_i (be_bpop_valid),
+    .bpop_cls_i   (be_bpop_cls),
+    .ret_valid_o  (be_ret_valid),
+    .ret_tix_o    (be_ret_tix),
     .idle_o
   );
 
@@ -70,25 +99,65 @@ module tsched_top import tsched_pkg::*; #(
     logic      done_v [LinkStages+1];
     logic      done_r [LinkStages+1];
     done_t     done_p [LinkStages+1];
+    // balancer links: element 0 is the sending end
+    logic      give_v [LinkStages+1];
+    give_t     give_p [LinkStages+1];
+    logic      bblk_v [LinkStages+1];
+    blk_t      bblk_p [LinkStages+1];
+    logic      ret_v  [LinkStages+1];
+    tix_t      ret_p  [LinkStages+1];
+    rep_t      rep_p  [LinkStages+1];
+    logic      rblk_v [LinkStages+1];
+    rblk_t     rblk_p [LinkStages+1];
+    logic      bpop_v [LinkStages+1];
+    logic      bpop_c [LinkStages+1];
 
     assign run_v[0]  = be_run_valid[d];
     assign run_p[0]  = be_run;
     assign load_v[0] = be_load_valid[d];
     assign load_p[0] = be_load;
+    assign give_v[0] = be_give_valid[d];
+    assign give_p[0] = be_give;
+    assign bblk_v[0] = be_bblk_valid[d];
+    assign bblk_p[0] = be_bblk;
+    assign ret_v[0]  = be_ret_valid[d];
+    assign ret_p[0]  = be_ret_tix;
+    assign rep_p[0]  = cl_rep[d];
+    assign rblk_v[0] = cl_rblk_valid[d];
+    assign rblk_p[0] = cl_rblk[d];
+    assign bpop_v[0] = cl_bpop_valid[d];
+    assign bpop_c[0] = cl_bpop_cls[d];
 
     for (genvar s = 0; s < LinkStages; s++) begin : gen_stage
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
           run_v[s+1]  <= 1'b0;
           load_v[s+1] <= 1'b0;
+          give_v[s+1] <= 1'b0;
+          bblk_v[s+1] <= 1'b0;
+          ret_v[s+1]  <= 1'b0;
+          rblk_v[s+1] <= 1'b0;
+          bpop_v[s+1] <= 1'b0;
+          rep_p[s+1]  <= '0;
         end else begin
           run_v[s+1]  <= run_v[s];
           load_v[s+1] <= load_v[s];
+          give_v[s+1] <= give_v[s];
+          bblk_v[s+1] <= bblk_v[s];
+          ret_v[s+1]  <= ret_v[s];
+          rblk_v[s+1] <= rblk_v[s];
+          bpop_v[s+1] <= bpop_v[s];
+          rep_p[s+1]  <= rep_p[s];
         end
       end
       always_ff @(posedge clk_i) begin
         if (run_v[s])  run_p[s+1]  <= run_p[s];
         if (load_v[s]) load_p[s+1] <= load_p[s];
+        if (give_v[s]) give_p[s+1] <= give_p[s];
+        if (bblk_v[s]) bblk_p[s+1] <= bblk_p[s];
+        if (ret_v[s])  ret_p[s+1]  <= ret_p[s];
+        if (rblk_v[s]) rblk_p[s+1] <= rblk_p[s];
+        if (bpop_v[s]) bpop_c[s+1] <= bpop_c[s];
       end
 
       spill_register #(
@@ -109,6 +178,17 @@ module tsched_top import tsched_pkg::*; #(
     assign cl_run[d]        = run_p[LinkStages];
     assign cl_load_valid[d] = load_v[LinkStages];
     assign cl_load[d]       = load_p[LinkStages];
+    assign cl_give_valid[d] = give_v[LinkStages];
+    assign cl_give[d]       = give_p[LinkStages];
+    assign cl_bblk_valid[d] = bblk_v[LinkStages];
+    assign cl_bblk[d]       = bblk_p[LinkStages];
+    assign cl_ret_valid[d]  = ret_v[LinkStages];
+    assign cl_ret_tix[d]    = ret_p[LinkStages];
+    assign be_rep[d]        = rep_p[LinkStages];
+    assign be_rblk_valid[d] = rblk_v[LinkStages];
+    assign be_rblk[d]       = rblk_p[LinkStages];
+    assign be_bpop_valid[d] = bpop_v[LinkStages];
+    assign be_bpop_cls[d]   = bpop_c[LinkStages];
 
     assign done_v[0]         = cl_done_valid[d];
     assign done_p[0]         = cl_done[d];
@@ -119,7 +199,7 @@ module tsched_top import tsched_pkg::*; #(
   end
 
   tsched_cluster #(
-    .LendEn  (LendEn),
+    .BalEn   (BalEn),
     .LendMin (LendMin)
   ) i_cluster (
     .clk_i,
@@ -131,6 +211,17 @@ module tsched_top import tsched_pkg::*; #(
     .done_valid_o (cl_done_valid),
     .done_ready_i (cl_done_ready),
     .done_o       (cl_done),
+    .rep_o        (cl_rep),
+    .give_valid_i (cl_give_valid),
+    .give_i       (cl_give),
+    .rblk_valid_o (cl_rblk_valid),
+    .rblk_o       (cl_rblk),
+    .bblk_valid_i (cl_bblk_valid),
+    .bblk_i       (cl_bblk),
+    .bpop_valid_o (cl_bpop_valid),
+    .bpop_cls_o   (cl_bpop_cls),
+    .ret_valid_i  (cl_ret_valid),
+    .ret_tix_i    (cl_ret_tix),
     .dma_valid_o,
     .dma_ready_i,
     .dma_o,

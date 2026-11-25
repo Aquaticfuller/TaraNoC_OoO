@@ -121,7 +121,7 @@ module tsched_group_disp import tsched_pkg::*; (
   always_ff @(posedge clk_i) begin
     if (blk_valid_i) buf_q[blk_i.b.pcls] <= blk_i;
     for (int unsigned p = 0; p < NumPes; p++) begin
-      if (start_oh[p])  run_q[p]       <= '{owner: buf_q[pe_cls(p)].owner, tix: buf_q[pe_cls(p)].b.tix};
+      if (start_oh[p])  run_q[p]       <= '{bor: buf_q[pe_cls(p)].bor, dom: buf_q[pe_cls(p)].b.dom, tix: buf_q[pe_cls(p)].b.tix};
       if (done_fire[p]) pend_info_q[p] <= run_q[p];
     end
   end

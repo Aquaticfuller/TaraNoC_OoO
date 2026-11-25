@@ -2,16 +2,16 @@
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
 
-// Cluster side of the task scheduler: the domain schedulers on their mesh, and the group dispatchers.
+// Cluster side of the task scheduler: the domain schedulers and the group dispatchers. The domains have
+// no links to each other; work moves between them through the cluster level.
 //
 // Numbering
 //   domain d   = dy * DomPerSide + dx
 //   group      = gy * (2 * DomPerSide) + gx on the group mesh; group j of domain d sits at
 //                gx = 2 * dx + j % 2, gy = 2 * dy + j / 2
-//   direction  0 north (dy - 1), 1 east (dx + 1), 2 south (dy + 1), 3 west (dx - 1)
 
 module tsched_cluster import tsched_pkg::*; #(
-  parameter bit          LendEn  = 1'b1,
+  parameter bit          BalEn   = 1'b1,
   parameter int unsigned LendMin = 1
 ) (
   input  logic                                clk_i,
@@ -24,6 +24,18 @@ module tsched_cluster import tsched_pkg::*; #(
   output logic      [NumDomains-1:0]          done_valid_o,
   input  logic      [NumDomains-1:0]          done_ready_i,
   output done_t     [NumDomains-1:0]          done_o,
+  // balancing by the cluster level, per domain
+  output rep_t      [NumDomains-1:0]          rep_o,
+  input  logic      [NumDomains-1:0]          give_valid_i,
+  input  give_t     [NumDomains-1:0]          give_i,
+  output logic      [NumDomains-1:0]          rblk_valid_o,
+  output rblk_t     [NumDomains-1:0]          rblk_o,
+  input  logic      [NumDomains-1:0]          bblk_valid_i,
+  input  blk_t      [NumDomains-1:0]          bblk_i,
+  output logic      [NumDomains-1:0]          bpop_valid_o,
+  output logic      [NumDomains-1:0]          bpop_cls_o,
+  input  logic      [NumDomains-1:0]          ret_valid_i,
+  input  tix_t      [NumDomains-1:0]          ret_tix_i,
   // DMA engines, per group
   output logic      [NumGroups-1:0]           dma_valid_o,
   input  logic      [NumGroups-1:0]           dma_ready_i,
@@ -43,32 +55,6 @@ module tsched_cluster import tsched_pkg::*; #(
     return (2 * (d / S) + j / 2) * (2 * S) + 2 * (d % S) + j % 2;
   endfunction
 
-  // Neighbour of domain d in direction k, or -1.
-  function automatic int nb_of(input int unsigned d, input int unsigned k);
-    int x, y;
-    x = d % S;
-    y = d / S;
-    unique case (k)
-      0:       y = y - 1;
-      1:       x = x + 1;
-      2:       y = y + 1;
-      default: x = x - 1;
-    endcase
-    return ((x < 0) || (y < 0) || (x >= S) || (y >= S)) ? -1 : y * S + x;
-  endfunction
-
-  function automatic logic [NumDir-1:0] nb_mask(input int unsigned d);
-    logic [NumDir-1:0] m;
-    for (int unsigned k = 0; k < NumDir; k++) m[k] = nb_of(d, k) >= 0;
-    return m;
-  endfunction
-
-  logic [NumDomains-1:0][NumDir-1:0][NumCls-1:0] want_out, want_in;
-  logic [NumDomains-1:0][NumDir-1:0]             lend_valid, lend_ready, bor_valid, bor_ready;
-  blk_t [NumDomains-1:0][NumDir-1:0]             lend_blk, bor_blk;
-  logic [NumDomains-1:0][NumDir-1:0]             ret_out_valid, ret_in_valid;
-  tix_t [NumDomains-1:0][NumDir-1:0]             ret_out, ret_in;
-
   for (genvar d = 0; d < NumDomains; d++) begin : gen_domain
     logic   [GroupsPerDomain-1:0]             blk_valid;
     gblk_t  [GroupsPerDomain-1:0]             blk;
@@ -78,30 +64,9 @@ module tsched_cluster import tsched_pkg::*; #(
     logic   [GroupsPerDomain-1:0]             dma_valid, dma_ready, dma_done;
     dma_req_t [GroupsPerDomain-1:0]           dma;
 
-    // Direction k of this domain meets direction k ^ 2 of the neighbour.
-    for (genvar k = 0; k < NumDir; k++) begin : gen_nb
-      if (nb_of(d, k) >= 0) begin : gen_link
-        localparam int unsigned N = nb_of(d, k);
-        assign want_in[d][k]      = want_out[N][k ^ 2];
-        assign bor_valid[d][k]    = lend_valid[N][k ^ 2];
-        assign bor_blk[d][k]      = lend_blk[N][k ^ 2];
-        assign lend_ready[d][k]   = bor_ready[N][k ^ 2];
-        assign ret_in_valid[d][k] = ret_out_valid[N][k ^ 2];
-        assign ret_in[d][k]       = ret_out[N][k ^ 2];
-      end else begin : gen_edge
-        assign want_in[d][k]      = '0;
-        assign bor_valid[d][k]    = 1'b0;
-        assign bor_blk[d][k]      = '0;
-        assign lend_ready[d][k]   = 1'b1;
-        assign ret_in_valid[d][k] = 1'b0;
-        assign ret_in[d][k]       = '0;
-      end
-    end
-
     tsched_domain #(
       .DomId   (d),
-      .NbMask  (nb_mask(d)),
-      .LendEn  (LendEn),
+      .BalEn   (BalEn),
       .LendMin (LendMin)
     ) i_domain (
       .clk_i,
@@ -124,19 +89,17 @@ module tsched_cluster import tsched_pkg::*; #(
       .gdone_valid_i  (gdone_valid),
       .gdone_ready_o  (gdone_ready),
       .gdone_i        (gdone),
-      .nb_want_o      (want_out[d]),
-      .nb_want_i      (want_in[d]),
-      .nb_blk_valid_o (lend_valid[d]),
-      .nb_blk_ready_i (lend_ready[d]),
-      .nb_blk_o       (lend_blk[d]),
-      .nb_blk_valid_i (bor_valid[d]),
-      .nb_blk_ready_o (bor_ready[d]),
-      .nb_blk_i       (bor_blk[d]),
-      .nb_ret_valid_o (ret_out_valid[d]),
-      .nb_ret_ready_i ('1),
-      .nb_ret_o       (ret_out[d]),
-      .nb_ret_valid_i (ret_in_valid[d]),
-      .nb_ret_i       (ret_in[d])
+      .rep_o          (rep_o[d]),
+      .give_valid_i   (give_valid_i[d]),
+      .give_i         (give_i[d]),
+      .rblk_valid_o   (rblk_valid_o[d]),
+      .rblk_o         (rblk_o[d]),
+      .bblk_valid_i   (bblk_valid_i[d]),
+      .bblk_i         (bblk_i[d]),
+      .bpop_valid_o   (bpop_valid_o[d]),
+      .bpop_cls_o     (bpop_cls_o[d]),
+      .ret_valid_i    (ret_valid_i[d]),
+      .ret_tix_i      (ret_tix_i[d])
     );
 
     for (genvar j = 0; j < GroupsPerDomain; j++) begin : gen_group
