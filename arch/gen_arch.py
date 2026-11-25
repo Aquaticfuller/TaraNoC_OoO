@@ -245,7 +245,7 @@ text(BX + 12, BY + 6, 700, 30, '(b) One %s · 2 × 2 groups and a domain schedul
 box(BX + 14, BY + 44, 432, 442, fill=C['new_bg'], stroke=C['new_dk'], sw=1.8, arc=6, tag='domain-scheduler')
 text(BX + 14, BY + 46, 432, 28, 'Domain Scheduler', bold=True, fs=15, align='center')
 rows = [(36, '<b>Task table</b> · 4 tasks · kernel, blocks, PE types, slot'),
-        (46, '<b>Load unit</b> · one tile at a time · starts the 4 DMA engines' + SMALL % '8 chunks per engine · progress = chunks all four have finished'),
+        (46, '<b>Load unit</b> · one tile at a time · starts the 4 DMA engines' + SMALL % '8 chunks, each whole rows across the 4 groups · progress = chunks all 4 finished'),
         (46, '<b>Block counters</b> per task · handed out, eligible, running' + SMALL % 'a task that follows a stream gets blocks as its tile arrives'),
         (46, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % '1. give command &nbsp;2. received block &nbsp;3. idle PE &nbsp;4. next block'),
         (36, '<b>Block read</b> · second stage: the fields of the block'),
@@ -315,7 +315,7 @@ vbox(CX + 538, CY + 44, 40, 2 * TH + 44, 'Router-to-tile crossbar', fill=C['rout
 vbox(CX + 586, CY + 44, 40, 2 * TH + 44, 'Mesh routers · burst plane 512-bit · word plane 32-bit', fill=C['xbar'], fc='#FFFFFF', sw=1.6, fs=12, bold=True, arc=6)
 by = CY + 44 + 2 * TH + 44 + 12
 new(CX + 14, by, 300, 52, '<b>Group Dispatcher</b><br><font style="font-size:11px">one next-block register per PE type · sends start and block to the dispatch register of the first idle PE</font>')
-box(CX + 324, by, 150, 52, '<b>DMA engine</b><br><font style="font-size:11px">1 stream lane, 64 B/cycle</font>', fill=C['route'], fc='#FFFFFF', sw=1.2, arc=4)
+box(CX + 324, by, 150, 52, '<b>DMA engine</b><br><font style="font-size:11px">request port for the load unit<br>1 stream lane, 64 B/cycle</font>', fill=C['route'], fc='#FFFFFF', sw=1.2, arc=4)
 box(CX + 484, by, 142, 52, '1 MiB of the shared L1 SPM', fill=C['spm'], fc='#FFFFFF', sw=1.2, arc=4, fs=12.5)
 
 # ------------------------------------------------------------------ (d) life of a task
@@ -365,8 +365,10 @@ flow([(2010, 1356), (1960, 1356)], color=C['l2'], sw=6)
 flow([(1560, 1356), (1504, 1356)], color=C['l2'], sw=6)
 flow([(1304, 1330), (1304, 1270)], color=C['l2'], sw=6)
 text(1316, 1280, 330, 40, 'weights arrive; blocks become eligible as the tile fills', fs=12.5)
-text(1104, 1396, 880, 70, 'Per layer step, FP16: one decode token streams 116 MiB and uses each weight for 1.1 multiply-adds; a 64-token midfill 770 MiB and 10; '
+text(1104, 1390, 880, 36, 'Per layer step, FP16: one decode token streams 116 MiB and uses each weight for 1.1 multiply-adds; a 64-token midfill 770 MiB and 10; '
      'a 2,048-token prefill 1,474 MiB and 174. With few tokens the PEs wait for the lanes.', fs=12.5, italic=True, valign='top')
+text(1104, 1428, 880, 36, '<b>Measured, one domain of real tiles:</b> a 16 KiB tile reaches its L1 slot in 243 cycles (8 chunks of 4 × 512 B, 30 cycles each); '
+     'a matrix block starts 6 cycles after its chunk has arrived in all four groups, while later chunks still stream.', fs=12.5, valign='top')
 
 xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<mxfile host="app.diagrams.net">\n  <diagram name="TeraNoC-OoO architecture" id="teranoc-ooo-arch">\n'
        '    <mxGraphModel grid="1" page="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="%d" pageHeight="%d" '
