@@ -11,4 +11,10 @@ dependencies:
   # TeraMonster: the tiles, DMA engines and L1 of the cluster (package name `mempool`).
   mempool: { git: "https://github.com/liyinrong/TeraNoC.git", rev: monster-dev }
 
-sources: []
+sources:
+  - sys/src/tsched_disp_bridge.sv
+
+  # Compiled together with the testbench of the cluster hardware, which instantiates the harness.
+  - target: all(simulation, mempool_vsim)
+    files:
+      - sys/tb/tsched_harness.sv
