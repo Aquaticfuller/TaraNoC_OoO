@@ -98,12 +98,12 @@ box(0, 0, W, H, fill='#FFFFFF', stroke='none', arc=0, tag='white-canvas')
 # ------------------------------------------------------------------ header and legend
 text(20, 8, 1440, 44, 'TeraNoC-OoO · an out-of-order host CPU schedules a shared-L1 compute cluster', fs=26, bold=True, tag='title')
 box(1480, 12, 26, 18, fill=C['white'])
-text(1512, 8, 190, 26, 'Host CPU, C910-class')
-box(1710, 12, 26, 18, fill=C['grp'])
-text(1742, 8, 420, 26, 'Compute cluster: TeraNoC, MergeCast, TeraMonster')
+text(1512, 8, 280, 26, 'Host CPU, C910-class · not built yet')
+box(1800, 12, 26, 18, fill=C['grp'])
+text(1832, 8, 560, 26, 'Compute cluster: TeraMonster tiles · one domain runs under the scheduler')
 box(1480, 38, 26, 18, fill=C['new'], sw=1.6)
-text(1512, 34, 190, 26, 'New in this design')
-text(1710, 34, 680, 26, 'Orange blocks carry the sizes of RTL version 1 · italic numbers come from the system model', italic=True)
+text(1512, 34, 280, 26, 'New in this design · RTL, sizes as built')
+text(1800, 34, 590, 26, 'Italic numbers come from the system model', italic=True)
 
 # ------------------------------------------------------------------ regions
 box(20, 66, 990, 470, fill=C['fe'], stroke='none', arc=0, tag='region-front-end')
@@ -299,7 +299,7 @@ line([(GX, GY + 7 * P + G), (CX + 8, CY)], color=C['new_dk'], sw=1.4, dashed='3 
 line([(GX + G, GY + 7 * P + G), (CX + 120, CY)], color=C['new_dk'], sw=1.4, dashed='3 3', tag='zoom')
 box(CX, CY, CW, CH, fill='#FFF8EE', stroke=C['new_dk'], sw=2.5, arc=8, tag='group-zoom')
 text(CX + 12, CY + 6, 600, 30, '(c) One group · 4 tiles · per tile 1 core with the tensor engine, 3 cores with a vector unit', fs=18, bold=True)
-TW, TH = 252, 148
+TW, TH = 252, 166
 for t in range(4):
     x, y = CX + 14 + (t % 2) * (TW + 10), CY + 44 + (t // 2) * (TH + 44)
     box(x, y, TW, TH, fill=C['tile'], sw=1.8, arc=6, tag='tile')
@@ -307,13 +307,14 @@ for t in range(4):
     box(x + 8, y + 26, 104, 56, '<b>Tensor engine</b><br><font style="font-size:11px">8 × 32 array<br>256 MAC/cycle</font>', fill=C['pe'], fc='#FFFFFF', sw=1.0, fs=12.5, arc=3)
     for v in range(3):
         box(x + 118, y + 26 + v * 19.5, 126, 17, 'Vector unit · 8 MAC/cycle', fill=C['pe2'], fc='#FFFFFF', sw=0.8, fs=10, arc=2, pad=0)
-    box(x + 8, y + 90, 236, 24, 'L1 SPM banks · 16 × 32-bit', fill=C['spm'], fc='#FFFFFF', sw=1.0, fs=12, arc=2)
-    box(x + 8, y + 119, 236, 22, 'Intra-tile crossbar', fill=C['xbar'], fc='#FFFFFF', sw=1.0, fs=12, arc=3, italic=True, bold=True)
+    box(x + 8, y + 87, 236, 19, '<b>Dispatch register</b> · block, wake, done · per core', fill=C['new'], sw=1.2, fs=10.5, arc=2, pad=0)
+    box(x + 8, y + 111, 236, 23, 'L1 SPM banks · 16 × 32-bit', fill=C['spm'], fc='#FFFFFF', sw=1.0, fs=12, arc=2)
+    box(x + 8, y + 139, 236, 21, 'Intra-tile crossbar', fill=C['xbar'], fc='#FFFFFF', sw=1.0, fs=12, arc=3, italic=True, bold=True)
 box(CX + 14, CY + 44 + TH + 8, 2 * TW + 10, 28, 'Intra-Group Crossbar', fill=C['xbar'], fc='#FFFFFF', sw=2.0, fs=14, bold=True, italic=True, arc=6)
 vbox(CX + 538, CY + 44, 40, 2 * TH + 44, 'Router-to-tile crossbar', fill=C['route'], fc='#FFFFFF', sw=1.6, fs=13, bold=True, arc=6)
 vbox(CX + 586, CY + 44, 40, 2 * TH + 44, 'Mesh routers · burst plane 512-bit · word plane 32-bit', fill=C['xbar'], fc='#FFFFFF', sw=1.6, fs=12, bold=True, arc=6)
 by = CY + 44 + 2 * TH + 44 + 12
-new(CX + 14, by, 300, 52, '<b>Group Dispatcher</b><br><font style="font-size:11px">one next-block register per PE type · wakes the core of the first idle PE</font>')
+new(CX + 14, by, 300, 52, '<b>Group Dispatcher</b><br><font style="font-size:11px">one next-block register per PE type · sends start and block to the dispatch register of the first idle PE</font>')
 box(CX + 324, by, 150, 52, '<b>DMA engine</b><br><font style="font-size:11px">1 stream lane, 64 B/cycle</font>', fill=C['route'], fc='#FFFFFF', sw=1.2, arc=4)
 box(CX + 484, by, 142, 52, '1 MiB of the shared L1 SPM', fill=C['spm'], fc='#FFFFFF', sw=1.2, arc=4, fs=12.5)
 
@@ -328,7 +329,7 @@ stages = [('Decode', 'cpu', 'TLoad, TRun, TJoin and TFree are recognised (host C
           ('Hand-over', 'new', 'registered link to the domain scheduler; credits, no ready wire', '2 stages'),
           ('Cut', 'dom', 'task → blocks by counters; follows the tile as it arrives', '≤ 1,023 blocks'),
           ('Dispatch', 'dom', 'one block per cycle to a group; an idle PE starts in the next cycle', '2 stages'),
-          ('Run', 'pe', 'a PE is a core: it reads the block from a register of its tile, runs the kernel, writes done', '<i>10³–10⁵ cycles</i>'),
+          ('Run', 'pe', 'a PE is a core: woken by the dispatch register of its tile, it reads the block, runs the kernel, writes done', '<i>10³–10⁵ cycles</i>'),
           ('Done', 'new', 'one completion per cycle; the slot is freed at its last user', '')]
 fillc = dict(cpu=C['white'], new=C['new'], dom=C['new_bg'], pe=C['pe2'])
 for k, (name, kind, what, rate) in enumerate(stages):
