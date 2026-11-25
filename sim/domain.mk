@@ -20,6 +20,7 @@ CONFIG  ?= domain_2x2
 BUILD   ?= $(ROOT)/sim/build/domain
 APP     ?= tsched_agent
 ARGS    ?=
+DEFS    ?=
 # Toolchains (LLVM, GCC, Bender 0.31 for the software flow) of an existing TeraMonster installation.
 TOOLS   ?= /usr/scratch/badile48/msc26f31/teranoc/TeraNoC/install
 # The FlooNoC generator needs Python 3.10 or newer with pydantic, networkx, mako, ruamel.yaml and click.
@@ -29,7 +30,7 @@ PYBIN   := $(ROOT)/working_dir/bin
 ENV     = PATH=$(PYBIN):$$PATH FLOO_DIR=$$(cd $(ROOT) && bender path floo_noc 2>/dev/null | tail -1)
 # The scheduler has one domain here, and the testbench of the cluster hardware gets our harness as its
 # external dispatcher.
-VLOGAN  := -assert svaext +v2k -override_timescale=1ns/1ps +define+TSCHED_DOM_PER_SIDE=1 +define+EXT_DISPATCH=tsched_harness
+VLOGAN  := -assert svaext +v2k -override_timescale=1ns/1ps +define+TSCHED_DOM_PER_SIDE=1 +define+EXT_DISPATCH=tsched_harness $(DEFS)
 # Program of task instructions for the host model (a directory with prog.txt, from scripts/gen_program.py).
 # sys/prog/gemm: one load of a tile into an L1 slot by the DMA engines, one task of eight matrix blocks for the
 # tensor engines that follows the load, twelve placeholder blocks for the vector units, then a block that checks

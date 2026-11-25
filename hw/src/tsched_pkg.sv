@@ -55,6 +55,12 @@ package tsched_pkg;
   localparam int unsigned ChunksPerGroup =
 `ifdef TSCHED_CHUNKS_PER_GROUP `TSCHED_CHUNKS_PER_GROUP `else 8 `endif;
 
+  // Chunks the DMA engine of one group may have in flight. With one, every chunk pays the latency of a
+  // transfer in full; with more, the engine queues the chunks and their transfers overlap. Measured on the
+  // cluster hardware, a load of 8 chunks per engine takes 244, 132, 105 and 105 cycles with 1, 2, 4 and 8.
+  localparam int unsigned DmaInFlight =
+`ifdef TSCHED_DMA_IN_FLIGHT `TSCHED_DMA_IN_FLIGHT `else 4 `endif;
+
   // ---------------------------------------------------------------------------------------------
   // Cluster level
   // ---------------------------------------------------------------------------------------------

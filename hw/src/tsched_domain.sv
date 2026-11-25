@@ -85,7 +85,7 @@ module tsched_domain import tsched_pkg::*; #(
   len_t                    ld_clen_q;
   addr_t                   ld_addr_q;
   len_t  [G-1:0]           ld_off_q;      // offset in the load of the next chunk of each group
-  logic  [G-1:0]           ld_busy_d, ld_busy_q;
+  logic  [G-1:0]           ld_full_d, ld_full_q;   // the engine of the group has DmaInFlight chunks in flight
   logic  [G-1:0][TickW-1:0] ld_issued_d, ld_issued_q, ld_cdone_d, ld_cdone_q;
   logic  [TickW-1:0]       ld_prog_d, ld_prog_q;
   logic  [G-1:0]           dma_fire;
@@ -93,14 +93,13 @@ module tsched_domain import tsched_pkg::*; #(
   logic                    ld_take;       // the completion of the load moves to the output register
 
   for (genvar g = 0; g < G; g++) begin : gen_dma
-    assign dma_valid_o[g] = ld_active_q & ~ld_busy_q[g] & (ld_issued_q[g] != TickW'(C));
+    assign dma_valid_o[g] = ld_active_q & ~ld_full_q[g] & (ld_issued_q[g] != TickW'(C));
     assign dma_o[g]       = '{slot: ld_slot_q, chunk: ld_issued_q[g][ChunkW-1:0], len: ld_clen_q, off: ld_off_q[g], addr: ld_addr_q};
     assign dma_fire[g]    = dma_valid_o[g] & dma_ready_i[g];
   end
 
   always_comb begin
     ld_active_d = ld_active_q;
-    ld_busy_d   = (ld_busy_q | dma_fire) & ~dma_done_i;
     ld_issued_d = ld_issued_q;
     ld_cdone_d  = ld_cdone_q;
     for (int unsigned g = 0; g < G; g++) begin
@@ -115,11 +114,11 @@ module tsched_domain import tsched_pkg::*; #(
     if (ld_take) ld_active_d = 1'b0;
     if (load_valid_i) begin
       ld_active_d = 1'b1;
-      ld_busy_d   = '0;
       ld_issued_d = '0;
       ld_cdone_d  = '0;
       ld_prog_d   = '0;
     end
+    for (int unsigned g = 0; g < G; g++) ld_full_d[g] = (ld_issued_d[g] - ld_cdone_d[g]) == TickW'(DmaInFlight);
   end
 
   always_comb begin
@@ -130,13 +129,13 @@ module tsched_domain import tsched_pkg::*; #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       ld_active_q <= 1'b0;
-      ld_busy_q   <= '0;
+      ld_full_q   <= '0;
       ld_issued_q <= '0;
       ld_cdone_q  <= '0;
       ld_prog_q   <= '0;
     end else begin
       ld_active_q <= ld_active_d;
-      ld_busy_q   <= ld_busy_d;
+      ld_full_q   <= ld_full_d;
       ld_issued_q <= ld_issued_d;
       ld_cdone_q  <= ld_cdone_d;
       ld_prog_q   <= ld_prog_d;
@@ -675,7 +674,7 @@ module tsched_domain import tsched_pkg::*; #(
       assert (!(run_valid_i && ins_none)) else $error("[tsched_domain %0d] task without a free entry", DomId);
       assert (!(load_valid_i && ld_active_q && !ld_take))
         else $error("[tsched_domain %0d] load while a load is streaming", DomId);
-      assert ((dma_done_i & ~ld_busy_q) == '0) else $error("[tsched_domain %0d] DMA completion without a chunk", DomId);
+      for (int unsigned g = 0; g < G; g++) assert (!(dma_done_i[g] && (ld_issued_q[g] == ld_cdone_q[g]))) else $error("[tsched_domain %0d] DMA completion without a chunk", DomId);
       assert ($onehot0(cut_oh)) else $error("[tsched_domain %0d] block cut from two tasks", DomId);
       assert ($onehot0(send_oh)) else $error("[tsched_domain %0d] block sent to two registers", DomId);
       assert ((send_oh & ~gcred_q) == '0) else $error("[tsched_domain %0d] block sent to a full register", DomId);
