@@ -46,6 +46,8 @@ run: $(BUILD)/simv
 # and SLOTS (slots per domain) must match the defines of that build. Every seed reuses one directory;
 # a failing seed is copied next to it.
 SEEDS  ?= 20
+# Share of the cycles (percent) in which the DMA engines of the testbench are not ready.
+STALL  ?= 25
 PIECES ?= 300
 SIDE   ?= 4
 SLOTS  ?= 4
@@ -54,7 +56,7 @@ RDIR   := $(ROOT)/sim/prog/regress_$(CFG)
 regress: $(BUILD)/simv
 	@pass=0; fail=0; for s in $$(seq 1 $(SEEDS)); do \
 	  python3 -I $(ROOT)/scripts/gen_program.py random $(RDIR) --side $(SIDE) --slots $(SLOTS) --seed $$s --pieces $(PIECES) > /dev/null; \
-	  (cd $(BUILD) && ./simv -nc -no_save -assert global_finish_maxfail=20 +DIR=$(RDIR) $(ARGS) 2>&1 | head -c $(LOG_MAX) > $(RDIR)/sim.log); \
+	  (cd $(BUILD) && ./simv -nc -no_save -assert global_finish_maxfail=20 +DIR=$(RDIR) +DMA_STALL=$(STALL) $(ARGS) 2>&1 | head -c $(LOG_MAX) > $(RDIR)/sim.log); \
 	  if grep -q '\[tb\] PASS' $(RDIR)/sim.log && ! grep -q -E 'ERROR|Error' $(RDIR)/sim.log; then pass=$$((pass+1)); \
 	  else fail=$$((fail+1)); cp -r $(RDIR) $(RDIR)_fail_$$s; echo "seed $$s FAILED: $(RDIR)_fail_$$s/sim.log"; fi; \
 	done; echo "regress $(CFG): $$pass passed, $$fail failed"; test $$fail -eq 0

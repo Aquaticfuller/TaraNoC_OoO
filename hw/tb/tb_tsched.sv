@@ -224,18 +224,47 @@ module tb_tsched;
   // ---------------------------------------------------------------------------------------------
   // DMA engines
   // ---------------------------------------------------------------------------------------------
+  // An engine takes the chunks it is given and works on them one after the other; a chunk takes its
+  // bytes divided by the lane rate. It checks that the scheduler keeps at most as many chunks in flight
+  // as it is built for and that every chunk names its place in the load. With +DMA_STALL=<percent> the
+  // engine is not ready in that share of the cycles, which exercises the scheduler's stalled requests.
+  localparam int unsigned InFlightMax = (DmaInFlight < ChunksPerGroup) ? ((DmaInFlight > 0) ? DmaInFlight : 1) : ChunksPerGroup;
+  int unsigned dma_stall = 0;
+  initial void'($value$plusargs("DMA_STALL=%d", dma_stall));
   for (genvar g = 0; g < NumGroups; g++) begin : gen_dma
+    int unsigned       q_left [$];     // cycles each chunk in flight needs once the engine works on it
+    logic [AddrW-1:0]  load_addr;
     initial begin
       dma_ready[g] = 1'b1;
       dma_done[g]  = 1'b0;
     end
     always @(posedge clk) begin
+      dma_done[g]  <= 1'b0;
+      dma_ready[g] <= (dma_stall == 0) || ($urandom_range(99) >= dma_stall);
+      if (rst_n && (q_left.size() != 0)) begin
+        q_left[0] = q_left[0] - 1;
+        if (q_left[0] == 0) begin
+          void'(q_left.pop_front());
+          dma_done[g] <= 1'b1;
+        end
+      end
       if (rst_n && dma_valid[g] && dma_ready[g]) begin
         automatic int unsigned d = (int'(dma[g].len) * 100 + lane_bpc100 - 1) / lane_bpc100;
         if (d == 0) d = 1;
-        dma_ready[g] <= 1'b0;
-        dma_done[g]  <= #(d * ClkPeriod) 1'b1;
+        q_left.push_back(d);
         st_lane_cycles += d;
+        if (q_left.size() > InFlightMax)
+          err($sformatf("group %0d: %0d chunks in flight, the scheduler is built for %0d", g, q_left.size(), InFlightMax));
+        if ($isunknown({dma[g].slot, dma[g].chunk, dma[g].len, dma[g].off, dma[g].addr}))
+          err($sformatf("group %0d: a chunk with unknown bits", g));
+        if ((dma[g].chunk == '0) && (q_left.size() != 1))
+          err($sformatf("group %0d: a load starts while %0d chunks of the previous one are in the engine", g, q_left.size() - 1));
+        if (longint'(dma[g].off) != longint'(dma[g].chunk) * longint'(dma[g].len) * GroupsPerDomain)
+          err($sformatf("group %0d chunk %0d: offset %0d in the load, expected %0d", g, dma[g].chunk, dma[g].off,
+                        longint'(dma[g].chunk) * longint'(dma[g].len) * GroupsPerDomain));
+        if (dma[g].chunk == '0) load_addr = dma[g].addr;
+        else if (dma[g].addr !== load_addr)
+          err($sformatf("group %0d chunk %0d: the address of the load changed", g, dma[g].chunk));
         if (dma[g].chunk == '0) begin
           automatic int unsigned dm = dom_of(g);
           g_slot[g]   = dma[g].slot;
@@ -247,8 +276,6 @@ module tb_tsched;
         end
       end
       if (dma_done[g]) begin
-        dma_done[g]  <= 1'b0;
-        dma_ready[g] <= 1'b1;
         g_chunks[g]++;
         last_event = cycle;
         if (slot_prog(dom_of(g), g_slot[g]) == C) begin
