@@ -298,7 +298,7 @@ CX, CY, CW, CH = 1104, 660, 640, 492
 line([(GX, GY + 7 * P + G), (CX + 8, CY)], color=C['new_dk'], sw=1.4, dashed='3 3', tag='zoom')
 line([(GX + G, GY + 7 * P + G), (CX + 120, CY)], color=C['new_dk'], sw=1.4, dashed='3 3', tag='zoom')
 box(CX, CY, CW, CH, fill='#FFF8EE', stroke=C['new_dk'], sw=2.5, arc=8, tag='group-zoom')
-text(CX + 12, CY + 6, 600, 30, '(c) One group · 4 tiles · the PE mix is a design parameter', fs=18, bold=True)
+text(CX + 12, CY + 6, 600, 30, '(c) One group · 4 tiles · per tile 1 core with the tensor engine, 3 cores with a vector unit', fs=18, bold=True)
 TW, TH = 252, 148
 for t in range(4):
     x, y = CX + 14 + (t % 2) * (TW + 10), CY + 44 + (t // 2) * (TH + 44)
@@ -313,7 +313,7 @@ box(CX + 14, CY + 44 + TH + 8, 2 * TW + 10, 28, 'Intra-Group Crossbar', fill=C['
 vbox(CX + 538, CY + 44, 40, 2 * TH + 44, 'Router-to-tile crossbar', fill=C['route'], fc='#FFFFFF', sw=1.6, fs=13, bold=True, arc=6)
 vbox(CX + 586, CY + 44, 40, 2 * TH + 44, 'Mesh routers · burst plane 512-bit · word plane 32-bit', fill=C['xbar'], fc='#FFFFFF', sw=1.6, fs=12, bold=True, arc=6)
 by = CY + 44 + 2 * TH + 44 + 12
-new(CX + 14, by, 300, 52, '<b>Group Dispatcher</b><br><font style="font-size:11px">one next-block register per PE type · starts the first idle PE</font>')
+new(CX + 14, by, 300, 52, '<b>Group Dispatcher</b><br><font style="font-size:11px">one next-block register per PE type · wakes the core of the first idle PE</font>')
 box(CX + 324, by, 150, 52, '<b>DMA engine</b><br><font style="font-size:11px">1 stream lane, 64 B/cycle</font>', fill=C['route'], fc='#FFFFFF', sw=1.2, arc=4)
 box(CX + 484, by, 142, 52, '1 MiB of the shared L1 SPM', fill=C['spm'], fc='#FFFFFF', sw=1.2, arc=4, fs=12.5)
 
@@ -328,7 +328,7 @@ stages = [('Decode', 'cpu', 'TLoad, TRun, TJoin and TFree are recognised (host C
           ('Hand-over', 'new', 'registered link to the domain scheduler; credits, no ready wire', '2 stages'),
           ('Cut', 'dom', 'task → blocks by counters; follows the tile as it arrives', '≤ 1,023 blocks'),
           ('Dispatch', 'dom', 'one block per cycle to a group; an idle PE starts in the next cycle', '2 stages'),
-          ('Run', 'pe', 'the PE reads its tiles through the shared L1', '<i>10³–10⁵ cycles</i>'),
+          ('Run', 'pe', 'a PE is a core: it reads the block from a register of its tile, runs the kernel, writes done', '<i>10³–10⁵ cycles</i>'),
           ('Done', 'new', 'one completion per cycle; the slot is freed at its last user', '')]
 fillc = dict(cpu=C['white'], new=C['new'], dom=C['new_bg'], pe=C['pe2'])
 for k, (name, kind, what, rate) in enumerate(stages):
