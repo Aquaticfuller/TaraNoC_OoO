@@ -4,7 +4,7 @@
 
 // Cluster level of the task scheduler: the part that sits in the back end of the host CPU.
 //
-//   task instruction -> rename -> window (until retire)
+//   task instruction -> rename (map stage, dispatch stage) -> window (until retire)
 //                              -> load queue      -> placement -> load port of a domain
 //                              -> run issue queue -> select    -> task port of a domain
 //   completions of the domains -> one per cycle -> window, wake-up, credits
@@ -47,7 +47,7 @@ module tsched_backend import tsched_pkg::*; (
   // -------------------------------------------------------------------------------------------
   // Rename, window, handle file
   // -------------------------------------------------------------------------------------------
-  logic        win_ready, win_alloc_valid;
+  logic        win_ready, win_alloc_valid, win_empty, ren_busy;
   wid_t        win_wid;
   win_alloc_t  win_alloc;
   logic        loadq_ready, loadq_valid;
@@ -86,6 +86,7 @@ module tsched_backend import tsched_pkg::*; (
     .instr_valid_i,
     .instr_ready_o,
     .instr_i,
+    .busy_o        (ren_busy),
     .win_ready_i   (win_ready),
     .win_wid_i     (win_wid),
     .win_valid_o   (win_alloc_valid),
@@ -130,10 +131,12 @@ module tsched_backend import tsched_pkg::*; (
     .join_valid_o  (join_valid),
     .join_ready_i  (join_ready),
     .join_wid_o    (join_wid),
-    .empty_o       (idle_o)
+    .empty_o       (win_empty)
   );
 
-  // Read ports: the two handles of the task being renamed.
+  assign idle_o = win_empty & ~ren_busy;
+
+  // Read ports: the two handles of the task in the dispatch stage of rename.
   assign hf_rd[0] = riq.s1;
   assign hf_rd[1] = riq.s2;
 

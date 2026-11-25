@@ -15,6 +15,7 @@ sources:
   - hw/src/tsched_age_sel.sv
   - hw/src/tsched_oh_mux.sv
   - hw/src/tsched_argmin.sv
+  - hw/src/tsched_rr_sel.sv
   - hw/src/tsched_rename.sv
   - hw/src/tsched_window.sv
   - hw/src/tsched_handle_file.sv

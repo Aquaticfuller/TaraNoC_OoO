@@ -17,6 +17,9 @@
 //           counters of the task move with the decision, the fields of the block are read from the
 //           task table in the next cycle. A task with a block running stays in the table, so these
 //           fields are stable for that read.
+//           The decision is built so that everything it needs is prepared in parallel: the flags of the
+//           tasks are registers, each tier of requests has its own select with a one-hot grant, and the
+//           counters have both outcomes ready. See the comments at each part.
 // Lending   A domain whose idle PEs find no block asks one neighbour at a time. A neighbour hands out a
 //           block of its own tasks when none of its own idle PEs can take it. The completion of a lent
 //           block returns to the lender, which keeps the join counter.
@@ -155,27 +158,30 @@ module tsched_domain import tsched_pkg::*; #(
   // -------------------------------------------------------------------------------------------
   // Task table
   // -------------------------------------------------------------------------------------------
-  logic  [T-1:0]            t_valid_d, t_valid_q;
-  wid_t  [T-1:0]            t_wid_q;
-  cls_t  [T-1:0]            t_cls_q;
-  nblk_t [T-1:0]            t_nblk_q;
-  nblk_t [T-1:0]            t_next_d, t_next_q;     // blocks handed out
-  nblk_t [T-1:0]            t_elig_d, t_elig_q;     // blocks that may be handed out
-  nblk_t [T-1:0]            t_out_d, t_out_q;       // blocks running
-  logic  [T-1:0]            t_follow_q, t_slot_v_q;
-  slot_t [T-1:0]            t_slot_q;
-  logic  [T-1:0][TickW-1:0] t_ticks_d, t_ticks_q;   // progress steps already turned into eligible blocks
+  logic  [T-1:0]             t_valid_d, t_valid_q;
+  wid_t  [T-1:0]             t_wid_q;
+  cls_t  [T-1:0]             t_cls_q;
+  nblk_t [T-1:0]             t_nblk_q;
+  nblk_t [T-1:0]             t_next_d, t_next_q;     // blocks handed out
+  nblk_t [T-1:0]             t_left_d, t_left_q;     // blocks that may be handed out and have not been
+  nblk_t [T-1:0]             t_out_d, t_out_q;       // blocks running
+  logic  [T-1:0]             t_avail_d, t_avail_q;   // t_left is not zero
+  logic  [T-1:0]             t_spare_d, t_spare_q;   // t_left is at least LendMin
+  nblk_t [T-1:0]             t_inc_d, t_inc_q;       // blocks that became eligible, added to t_left next
+  logic  [T-1:0]             t_follow_q, t_slot_v_q;
+  slot_t [T-1:0]             t_slot_q;
+  logic  [T-1:0][TickW-1:0]  t_ticks_d, t_ticks_q;   // progress steps already turned into eligible blocks
   logic  [T-1:0][ChunkW-1:0] t_acc_d, t_acc_q;
-  kern_t [T-1:0]            t_kern_q;
-  arg_t  [T-1:0]            t_arg_q;
+  kern_t [T-1:0]             t_kern_q;
+  arg_t  [T-1:0]             t_arg_q;
 
-  logic  [T-1:0]            ins_oh;
-  tix_t                     ins_idx;
-  logic                     ins_none;
-  logic  [T-1:0]            avail, spare, t_fin;
-  logic  [T-1:0]            cut_oh;                 // the task a block is cut from this cycle
-  logic  [T-1:0][DecW-1:0]  t_dec;                  // completions per task this cycle
-  logic  [T-1:0]            t_take;                 // the completion of the task moves to the output register
+  logic  [T-1:0]             ins_oh;
+  tix_t                      ins_idx;
+  logic                      ins_none;
+  logic  [T-1:0]             t_fin;
+  logic  [T-1:0]             cut_oh;                 // the task a block is cut from this cycle
+  logic  [T-1:0][DecW-1:0]   t_dec_d, t_dec_q;       // completions per task, subtracted from t_out next
+  logic  [T-1:0]             t_take;                 // the completion of the task moves to the output register
 
   lzc #(
     .WIDTH (T),
@@ -192,41 +198,55 @@ module tsched_domain import tsched_pkg::*; #(
   end
 
   for (genvar t = 0; t < T; t++) begin : gen_task
-    logic [NblkW:0] left;
-    assign left     = {1'b0, t_elig_q[t]} - {1'b0, t_next_q[t]};
-    assign avail[t] = t_valid_q[t] & (t_next_q[t] != t_elig_q[t]);
-    assign spare[t] = t_valid_q[t] & (left >= (NblkW+1)'(LendMin));
     assign t_fin[t] = t_valid_q[t] & (t_next_q[t] == t_nblk_q[t]) & (t_out_q[t] == '0);
   end
 
+  // The decision of this cycle (cut_oh) is the last signal to arrive. Both outcomes of every counter and
+  // flag are prepared from registers, so the decision only selects between them. For the same reason
+  // the eligible blocks (t_inc) and the completions (t_dec) are added one cycle after they are found.
   always_comb begin
     t_valid_d = t_valid_q & ~t_take;
-    t_next_d  = t_next_q;
-    t_elig_d  = t_elig_q;
-    t_out_d   = t_out_q;
     t_ticks_d = t_ticks_q;
     t_acc_d   = t_acc_q;
     for (int unsigned t = 0; t < T; t++) begin
       logic [TickW-1:0] target;
       logic [NblkW:0]   sum;
+      nblk_t            left_a, out_m;
       // Progress of the slot the task reads: the load in flight if it fills that slot, else complete.
       target = (ld_active_q && (ld_slot_q == t_slot_q[t])) ? ld_prog_q : TickW'(C);
       sum    = (NblkW+1)'(t_acc_q[t]) + (NblkW+1)'(t_nblk_q[t]);
-      // One progress step per cycle: elig = floor(steps * nblk / C), kept exact by the remainder in acc.
+      // One progress step per cycle: eligible = floor(steps * nblk / C), kept exact by the remainder in acc.
+      t_inc_d[t] = '0;
       if (t_valid_q[t] && t_follow_q[t] && (t_ticks_q[t] < target)) begin
         t_ticks_d[t] = t_ticks_q[t] + TickW'(1);
-        t_elig_d[t]  = t_elig_q[t] + nblk_t'(sum >> ChunkW);
+        t_inc_d[t]   = nblk_t'(sum >> ChunkW);
         t_acc_d[t]   = sum[ChunkW-1:0];
       end
-      if (cut_oh[t]) t_next_d[t] = t_next_q[t] + nblk_t'(1);
-      t_out_d[t] = t_out_q[t] + nblk_t'(cut_oh[t]) - nblk_t'(t_dec[t]);
+      left_a = t_left_q[t] + t_inc_q[t];
+      out_m  = t_out_q[t] - nblk_t'(t_dec_q[t]);
+      if (cut_oh[t]) begin
+        t_next_d[t]  = t_next_q[t] + nblk_t'(1);
+        t_left_d[t]  = left_a - nblk_t'(1);
+        t_out_d[t]   = out_m + nblk_t'(1);
+        t_avail_d[t] = left_a != nblk_t'(1);
+        t_spare_d[t] = {1'b0, left_a} >= (NblkW+1)'(LendMin + 1);
+      end else begin
+        t_next_d[t]  = t_next_q[t];
+        t_left_d[t]  = left_a;
+        t_out_d[t]   = out_m;
+        t_avail_d[t] = t_valid_q[t] & (left_a != '0);
+        t_spare_d[t] = t_valid_q[t] & ({1'b0, left_a} >= (NblkW+1)'(LendMin));
+      end
       if (ins_oh[t]) begin
         t_valid_d[t] = 1'b1;
         t_next_d[t]  = '0;
         t_out_d[t]   = '0;
         t_ticks_d[t] = '0;
         t_acc_d[t]   = '0;
-        t_elig_d[t]  = (run_i.follow & run_i.slot_v) ? '0 : run_i.nblk;
+        // A task that follows a stream starts with no eligible block.
+        t_left_d[t]  = (run_i.follow & run_i.slot_v) ? '0 : run_i.nblk;
+        t_avail_d[t] = ~(run_i.follow & run_i.slot_v);
+        t_spare_d[t] = ~(run_i.follow & run_i.slot_v) & ({1'b0, run_i.nblk} >= (NblkW+1)'(LendMin));
       end
     end
   end
@@ -234,14 +254,22 @@ module tsched_domain import tsched_pkg::*; #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       t_valid_q <= '0;
+      t_avail_q <= '0;
+      t_spare_q <= '0;
+      t_inc_q   <= '0;
+      t_dec_q   <= '0;
     end else begin
       t_valid_q <= t_valid_d;
+      t_avail_q <= t_avail_d;
+      t_spare_q <= t_spare_d;
+      t_inc_q   <= t_inc_d;
+      t_dec_q   <= t_dec_d;
     end
   end
 
   always_ff @(posedge clk_i) begin
     t_next_q  <= t_next_d;
-    t_elig_q  <= t_elig_d;
+    t_left_q  <= t_left_d;
     t_out_q   <= t_out_d;
     t_ticks_q <= t_ticks_d;
     t_acc_q   <= t_acc_d;
@@ -269,10 +297,10 @@ module tsched_domain import tsched_pkg::*; #(
   for (genvar c = 0; c < NumCls; c++) begin : gen_cand
     logic [T-1:0] own_excl, own_any, lend_excl, lend_any;
     for (genvar t = 0; t < T; t++) begin : gen_t
-      assign own_any[t]   = avail[t] & t_cls_q[t][c];
+      assign own_any[t]   = t_avail_q[t] & t_cls_q[t][c];
       assign own_excl[t]  = own_any[t] & (t_cls_q[t] == (cls_t'(1) << c));
-      assign lend_any[t]  = own_any[t] & spare[t];
-      assign lend_excl[t] = own_excl[t] & spare[t];
+      assign lend_any[t]  = own_any[t] & t_spare_q[t];
+      assign lend_excl[t] = own_excl[t] & t_spare_q[t];
     end
     assign sel_req[c]        = (|own_excl)  ? own_excl  : own_any;
     assign sel_req[NumCls+c] = (|lend_excl) ? lend_excl : lend_any;
@@ -305,38 +333,35 @@ module tsched_domain import tsched_pkg::*; #(
   end
 
   // The decision taken in the previous cycle.
-  logic            d_v_q;            // a block was decided
-  logic            d_bor_q;          // it is a borrowed block, passed on to a group
-  logic            d_nb_q;           // it is lent to the neighbour in direction d_dir_q
-  logic [GrpW-1:0] d_grp_q;
-  logic            d_cls_q;
-  logic [1:0]      d_dir_q;
-  logic [T-1:0]    d_oh_q;           // task it is cut from, one-hot
-  nblk_t           d_bidx_q;
-  blk_t            d_bblk_q;         // the borrowed block
+  logic              d_v_q;          // a block was decided
+  logic              d_bor_q;        // it is a borrowed block, passed on to a group
+  logic              d_nb_q;         // it is lent to a neighbour
+  logic [G-1:0]      d_goh_q;        // group that gets it, one-hot
+  logic              d_cls_q;
+  logic [NumDir-1:0] d_doh_q;        // direction it is lent to or was borrowed from, one-hot
+  logic [T-1:0]      d_oh_q;         // task it is cut from, one-hot
+  blk_t              d_bblk_q;       // the borrowed block
 
-  // A lent block waits in a register per direction. A register is free for a new decision if it is
-  // empty or being read, and the decision of the previous cycle is not on its way into it.
+  // A lent block waits in a register per direction. A new block is decided for a direction only when
+  // that register is empty and no block is on its way into it. The ready of the neighbour is not used
+  // here, so no path runs from one domain's decision through the neighbour into the next decision.
   logic [NumDir-1:0] lend_v_d, lend_v_q;
   blk_t [NumDir-1:0] lend_q;
   logic [NumDir-1:0] lend_free;
-  for (genvar d = 0; d < NumDir; d++) begin : gen_lend_free
-    assign lend_free[d] = (~lend_v_q[d] | nb_blk_ready_i[d]) & ~(d_v_q & d_nb_q & (d_dir_q == 2'(d)));
-  end
+  assign lend_free      = ~lend_v_q & ~({NumDir{d_v_q & d_nb_q}} & d_doh_q);
   assign nb_blk_valid_o = lend_v_q;
   assign nb_blk_o       = lend_q;
 
-  // Three tiers: own registers with an idle PE, neighbours, own registers that prepare the next block.
+  // Three tiers of requests: own registers with an idle PE, neighbours, own registers that prepare the
+  // next block. Each tier has its own round-robin select; all three run in parallel and the tier is
+  // chosen last.
   localparam int unsigned NumOwn = G * NumCls;
   localparam int unsigned NumNb  = NumDir * NumCls;
-  localparam int unsigned NumReq = 2 * NumOwn + NumNb;
-  localparam int unsigned ReqW   = $clog2(NumReq);
 
-  logic [NumOwn-1:0] r_urg, r_pre;
-  logic [NumNb-1:0]  r_nb;
-  logic [NumReq-1:0] r_all, r_gnt;
-  logic              r_valid;
-  logic [ReqW-1:0]   r_idx;
+  logic [NumOwn-1:0] r_urg, r_pre, g_urg, g_pre;
+  logic [NumNb-1:0]  r_nb, g_nb;
+  logic              any_urg, any_nb, any_pre;
+  logic              sel_b, sel_u, sel_n, sel_p;
 
   for (genvar g = 0; g < G; g++) begin : gen_r_own
     for (genvar c = 0; c < NumCls; c++) begin : gen_c
@@ -350,108 +375,134 @@ module tsched_domain import tsched_pkg::*; #(
     end
   end
 
-  // Borrowed blocks go first: they are only requested when the own tasks had nothing for that class.
-  logic [NumDir-1:0] b_can;
-  logic              b_any;
-  logic [1:0]        b_dir;
-  logic              b_cls;
-  logic [GrpW-1:0]   b_grp;
-  always_comb begin
-    b_any = 1'b0;
-    b_dir = '0;
-    for (int unsigned d = 0; d < NumDir; d++) begin
-      logic any_cred;
-      any_cred = 1'b0;
-      for (int unsigned g = 0; g < G; g++) any_cred |= gcred_q[g][nb_blk_i[d].pcls];
-      b_can[d] = nb_blk_valid_i[d] & any_cred;
-    end
-    for (int d = NumDir - 1; d >= 0; d--) begin
-      if (b_can[d]) begin
-        b_any = 1'b1;
-        b_dir = 2'(d);
-      end
-    end
-    b_cls = nb_blk_i[b_dir].pcls;
-    b_grp = '0;
-    for (int g = G - 1; g >= 0; g--) if (gcred_q[g][b_cls]) b_grp = GrpW'(g);
-    for (int g = G - 1; g >= 0; g--) if (urg[g][b_cls])     b_grp = GrpW'(g);
-  end
-  for (genvar d = 0; d < NumDir; d++) begin : gen_b_ready
-    assign nb_blk_ready_o[d] = b_any & (b_dir == 2'(d));
-  end
-
-  always_comb begin
-    r_all = '0;
-    if (!b_any) begin
-      if (|r_urg)     r_all[NumOwn-1:0]                  = r_urg;
-      else if (|r_nb) r_all[NumOwn+NumNb-1:NumOwn]       = r_nb;
-      else            r_all[NumReq-1:NumOwn+NumNb]       = r_pre;
-    end
-  end
-
-  rr_arb_tree #(
-    .NumIn     (NumReq),
-    .DataWidth (1),
-    .ExtPrio   (1'b0),
-    .AxiVldRdy (1'b1),
-    .LockIn    (1'b0),
-    .FairArb   (1'b1)
-  ) i_req_arb (
+  tsched_rr_sel #(.N (NumOwn)) i_sel_urg (
     .clk_i,
     .rst_ni,
-    .flush_i (1'b0),
-    .rr_i    ('0),
-    .req_i   (r_all),
-    .gnt_o   (r_gnt),
-    .data_i  ('0),
-    .req_o   (r_valid),
-    .gnt_i   (1'b1),
-    .data_o  (/* unused */),
-    .idx_o   (r_idx)
+    .req_i  (r_urg),
+    .take_i (sel_u),
+    .any_o  (any_urg),
+    .gnt_o  (g_urg)
   );
 
-  // Decode the winner.
-  logic            w_nb;                 // the block is lent
-  logic            w_cls;
-  logic [GrpW-1:0] w_grp;
-  logic [1:0]      w_dir;
+  tsched_rr_sel #(.N (NumNb)) i_sel_nb (
+    .clk_i,
+    .rst_ni,
+    .req_i  (r_nb),
+    .take_i (sel_n),
+    .any_o  (any_nb),
+    .gnt_o  (g_nb)
+  );
+
+  tsched_rr_sel #(.N (NumOwn)) i_sel_pre (
+    .clk_i,
+    .rst_ni,
+    .req_i  (r_pre),
+    .take_i (sel_p),
+    .any_o  (any_pre),
+    .gnt_o  (g_pre)
+  );
+
+  // Borrowed blocks go first: they are only requested when the own tasks had nothing for that class.
+  // Per class, the group that takes one: the first with an idle PE, else the first empty register.
+  logic [NumCls-1:0][G-1:0] b_pick;
+  logic [NumCls-1:0]        b_room;
+  logic [NumDir-1:0]        b_can, b_doh;
+  logic                     b_cls;
+  logic [G-1:0]             b_goh;
+  blk_t                     b_blk;
+
   always_comb begin
-    logic [ReqW-1:0] rel;
-    w_nb  = (r_idx >= ReqW'(NumOwn)) && (r_idx < ReqW'(NumOwn + NumNb));
-    rel   = w_nb ? (r_idx - ReqW'(NumOwn)) : ((r_idx < ReqW'(NumOwn)) ? r_idx : (r_idx - ReqW'(NumOwn + NumNb)));
-    w_cls = rel[0];
-    w_grp = GrpW'(rel >> 1);
-    w_dir = 2'(rel >> 1);
+    for (int unsigned c = 0; c < NumCls; c++) begin
+      logic [G-1:0] u, e, u_first, e_first;
+      for (int unsigned g = 0; g < G; g++) begin
+        u[g] = urg[g][c];
+        e[g] = gcred_q[g][c];
+      end
+      for (int unsigned g = 0; g < G; g++) begin
+        u_first[g] = u[g] & ~(|(u & G'((32'd1 << g) - 32'd1)));
+        e_first[g] = e[g] & ~(|(e & G'((32'd1 << g) - 32'd1)));
+      end
+      b_pick[c] = (|u) ? u_first : e_first;
+      b_room[c] = |e;
+    end
+    for (int unsigned d = 0; d < NumDir; d++) begin
+      b_can[d] = nb_blk_valid_i[d] & b_room[nb_blk_i[d].pcls];
+    end
+    b_cls = 1'b0;
+    b_blk = '0;
+    for (int unsigned d = 0; d < NumDir; d++) begin
+      b_doh[d] = b_can[d] & ~(|(b_can & NumDir'((32'd1 << d) - 32'd1)));
+      b_cls   |= b_doh[d] & nb_blk_i[d].pcls;
+      b_blk   |= {$bits(blk_t){b_doh[d]}} & nb_blk_i[d];
+    end
+    b_goh = b_pick[b_cls];
   end
 
-  // The task the winner's block is cut from, and the index of that block. The grant of the age select
-  // is one-hot.
-  logic [T-1:0] cut_sel;
-  nblk_t        cut_bidx;
+  assign sel_b          = |b_can;
+  assign sel_u          = ~sel_b & any_urg;
+  assign sel_n          = ~sel_b & ~any_urg & any_nb;
+  assign sel_p          = ~sel_b & ~any_urg & ~any_nb & any_pre;
+  assign nb_blk_ready_o = b_doh;
+
+  // Per tier: the class of the winner and the task its block is cut from (the grants are one-hot).
+  logic [NumCls-1:0] c_urg, c_nb, c_pre;
+  logic [T-1:0]      k_urg, k_nb, k_pre;
+  logic [NumDir-1:0] n_doh;
   always_comb begin
-    cut_sel  = w_nb ? sel_gnt[NumCls + 32'(w_cls)] : sel_gnt[32'(w_cls)];
-    cut_oh   = r_valid ? cut_sel : '0;
-    cut_bidx = '0;
-    for (int unsigned t = 0; t < T; t++) cut_bidx |= {NblkW{cut_sel[t]}} & t_next_q[t];
+    c_urg = '0;
+    c_nb  = '0;
+    c_pre = '0;
+    n_doh = '0;
+    for (int unsigned c = 0; c < NumCls; c++) begin
+      for (int unsigned g = 0; g < G; g++) begin
+        c_urg[c] |= g_urg[g * NumCls + c];
+        c_pre[c] |= g_pre[g * NumCls + c];
+      end
+      for (int unsigned d = 0; d < NumDir; d++) begin
+        c_nb[c]  |= g_nb[d * NumCls + c];
+        n_doh[d] |= g_nb[d * NumCls + c];
+      end
+    end
+    k_urg = '0;
+    k_nb  = '0;
+    k_pre = '0;
+    for (int unsigned c = 0; c < NumCls; c++) begin
+      k_urg |= {T{c_urg[c]}} & sel_gnt[c];
+      k_pre |= {T{c_pre[c]}} & sel_gnt[c];
+      k_nb  |= {T{c_nb[c]}}  & sel_gnt[NumCls + c];
+    end
+  end
+
+  assign cut_oh = ({T{sel_u}} & k_urg) | ({T{sel_n}} & k_nb) | ({T{sel_p}} & k_pre);
+
+  // The next-block register that gets a block, one-hot over group and class.
+  logic [G-1:0][NumCls-1:0] send_oh;
+  logic [G-1:0]             send_goh;
+  logic                     send_cls;
+  always_comb begin
+    for (int unsigned g = 0; g < G; g++) begin
+      for (int unsigned c = 0; c < NumCls; c++) begin
+        send_oh[g][c] = (sel_b & b_goh[g] & (b_cls == 1'(c)))
+                      | (sel_u & g_urg[g * NumCls + c])
+                      | (sel_p & g_pre[g * NumCls + c]);
+      end
+      send_goh[g] = |send_oh[g];
+    end
+    send_cls = (sel_b & b_cls) | (sel_u & c_urg[NumCls-1]) | (sel_n & c_nb[NumCls-1]) | (sel_p & c_pre[NumCls-1]);
   end
 
   // -------------------------------------------------------------------------------------------
   // Block outputs
   // -------------------------------------------------------------------------------------------
-  logic            send_own, send_bor;
-  logic [GrpW-1:0] send_grp;
-  logic            send_cls;
-
-  assign send_bor = b_any;
-  assign send_own = r_valid & ~w_nb;
-  assign send_grp = send_bor ? b_grp : w_grp;
-  assign send_cls = send_bor ? b_cls : w_cls;
-
-  // The block of the previous cycle's decision, read from the task table.
-  blk_t  asm_blk;
-  gblk_t out_blk;
+  // The block of the previous cycle's decision, read from the task table. The counter of the task has
+  // moved on by one since the decision, so the index of the block is that counter minus one.
+  blk_t   asm_blk;
+  gblk_t  out_blk;
+  nblk_t  asm_next;
+  owner_t d_owner;
   always_comb begin
-    asm_blk = '0;
+    asm_blk  = '0;
+    asm_next = '0;
     for (int unsigned t = 0; t < T; t++) begin
       if (d_oh_q[t]) begin
         asm_blk.kern   = t_kern_q[t];
@@ -460,49 +511,51 @@ module tsched_domain import tsched_pkg::*; #(
         asm_blk.slot_v = t_slot_v_q[t];
         asm_blk.slot   = t_slot_q[t];
         asm_blk.tix    = tix_t'(t);
+        asm_next       = t_next_q[t];
       end
     end
-    asm_blk.bidx = d_bidx_q;
+    asm_blk.bidx = asm_next - nblk_t'(1);
     asm_blk.dom  = dom_t'(DomId);
     asm_blk.pcls = d_cls_q;
+    d_owner = '0;
+    for (int unsigned d = 0; d < NumDir; d++) begin
+      if (d_doh_q[d]) d_owner = owner_t'(d + 1);
+    end
   end
-  assign out_blk = d_bor_q ? '{owner: owner_t'(3'd1 + 3'(d_dir_q)), b: d_bblk_q} : '{owner: '0, b: asm_blk};
+  assign out_blk = d_bor_q ? '{owner: d_owner, b: d_bblk_q} : '{owner: '0, b: asm_blk};
 
-  always_comb begin
-    gcred_d  = gcred_q | pop_i;
-    lend_v_d = lend_v_q & ~nb_blk_ready_i;
-    if (send_bor || send_own) gcred_d[send_grp][send_cls] = 1'b0;
-    if (d_v_q && d_nb_q)      lend_v_d[d_dir_q]           = 1'b1;
-  end
+  assign gcred_d  = (gcred_q | pop_i) & ~send_oh;
+  assign lend_v_d = (lend_v_q & ~nb_blk_ready_i) | ({NumDir{d_v_q & d_nb_q}} & d_doh_q);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       d_v_q       <= 1'b0;
+      d_nb_q      <= 1'b0;
       blk_valid_o <= '0;
       gcred_q     <= '1;
       lend_v_q    <= '0;
     end else begin
-      d_v_q       <= send_bor | r_valid;
-      blk_valid_o <= '0;
-      if (d_v_q && !d_nb_q) blk_valid_o[d_grp_q] <= 1'b1;
+      d_v_q       <= sel_b | sel_u | sel_n | sel_p;
+      d_nb_q      <= sel_n;
+      blk_valid_o <= {G{d_v_q & ~d_nb_q}} & d_goh_q;
       gcred_q     <= gcred_d;
       lend_v_q    <= lend_v_d;
     end
   end
 
   always_ff @(posedge clk_i) begin
-    if (send_bor || r_valid) begin
-      d_bor_q  <= send_bor;
-      d_nb_q   <= ~send_bor & w_nb;
-      d_grp_q  <= send_grp;
-      d_cls_q  <= send_cls;
-      d_dir_q  <= send_bor ? b_dir : w_dir;
-      d_oh_q   <= cut_sel;
-      d_bidx_q <= cut_bidx;
+    d_bor_q <= sel_b;
+    d_goh_q <= send_goh;
+    d_cls_q <= send_cls;
+    d_doh_q <= sel_b ? b_doh : n_doh;
+    d_oh_q  <= cut_oh;
+    if (sel_b) d_bblk_q <= b_blk;
+    for (int unsigned g = 0; g < G; g++) begin
+      if (d_v_q && !d_nb_q && d_goh_q[g]) blk_o[g] <= out_blk;
     end
-    if (send_bor) d_bblk_q <= nb_blk_i[b_dir];
-    if (d_v_q && !d_nb_q) blk_o[d_grp_q]  <= out_blk;
-    if (d_v_q && d_nb_q)  lend_q[d_dir_q] <= asm_blk;
+    for (int unsigned d = 0; d < NumDir; d++) begin
+      if (d_v_q && d_nb_q && d_doh_q[d]) lend_q[d] <= asm_blk;
+    end
   end
 
   // -------------------------------------------------------------------------------------------
@@ -514,13 +567,10 @@ module tsched_domain import tsched_pkg::*; #(
 
   always_comb begin
     for (int unsigned c = 0; c < NumCls; c++) begin
-      starve[c] = ~has_own[c];
-      begin
-        logic any_urg;
-        any_urg = 1'b0;
-        for (int unsigned g = 0; g < G; g++) any_urg |= urg[g][c];
-        starve[c] &= any_urg;
-      end
+      logic idle_c;
+      idle_c = 1'b0;
+      for (int unsigned g = 0; g < G; g++) idle_c |= urg[g][c];
+      starve[c] = ~has_own[c] & idle_c;
     end
   end
 
@@ -552,39 +602,60 @@ module tsched_domain import tsched_pkg::*; #(
   // -------------------------------------------------------------------------------------------
   logic [NumDir-1:0] ret_v_d, ret_v_q;
   tix_t [NumDir-1:0] ret_d, ret_q;
-  logic [G-1:0]      gdone_fire, gdone_self;
+  logic [G-1:0]      gdone_self;
+  logic [G-1:0][NumDir-1:0] ret_want;   // a completion of a borrowed block, by the direction it returns to
+  logic [NumDir-1:0] ret_free;
 
   assign nb_ret_valid_o = ret_v_q;
   assign nb_ret_o       = ret_q;
+  assign ret_free       = ~ret_v_q | nb_ret_ready_i;
 
+  // A completion of an own block is always taken. A completion of a borrowed block needs the return
+  // register of its direction; among the groups that want one register the lowest wins. Who wins does
+  // not depend on whether the register is free, so the two are found in parallel.
   always_comb begin
-    logic [NumDir-1:0] taken;
     ret_v_d = ret_v_q & ~nb_ret_ready_i;
     ret_d   = ret_q;
-    taken   = '0;
     for (int unsigned g = 0; g < G; g++) begin
-      logic [1:0] dir;
-      dir            = 2'(gdone_i[g].owner - owner_t'(1));
-      gdone_self[g]  = gdone_i[g].owner == '0;
-      // A completion of a borrowed block needs the return register of its direction; the lowest group wins.
-      gdone_ready_o[g] = gdone_self[g] | ((~ret_v_q[dir] | nb_ret_ready_i[dir]) & ~taken[dir]);
-      gdone_fire[g]    = gdone_valid_i[g] & gdone_ready_o[g];
-      if (gdone_fire[g] && !gdone_self[g]) begin
-        taken[dir]   = 1'b1;
-        ret_v_d[dir] = 1'b1;
-        ret_d[dir]   = gdone_i[g].tix;
+      gdone_self[g] = gdone_i[g].owner == '0;
+      for (int unsigned d = 0; d < NumDir; d++) begin
+        ret_want[g][d] = gdone_valid_i[g] & (gdone_i[g].owner == owner_t'(d + 1));
+      end
+    end
+    for (int unsigned g = 0; g < G; g++) begin
+      logic [NumDir-1:0] first;
+      first = ret_want[g];
+      for (int unsigned k = 0; k < g; k++) first &= ~ret_want[k];
+      gdone_ready_o[g] = gdone_self[g] | (|(first & ret_free));
+    end
+    // The return registers: per direction a one-hot choice of the group.
+    for (int unsigned d = 0; d < NumDir; d++) begin
+      logic any;
+      tix_t tix;
+      any = 1'b0;
+      tix = '0;
+      for (int unsigned g = 0; g < G; g++) begin
+        logic first;
+        first = ret_want[g][d];
+        for (int unsigned k = 0; k < g; k++) first &= ~ret_want[k][d];
+        any |= first;
+        tix |= {TixW{first}} & gdone_i[g].tix;
+      end
+      if (any && ret_free[d]) begin
+        ret_v_d[d] = 1'b1;
+        ret_d[d]   = tix;
       end
     end
   end
 
   always_comb begin
     for (int unsigned t = 0; t < T; t++) begin
-      t_dec[t] = '0;
+      t_dec_d[t] = '0;
       for (int unsigned g = 0; g < G; g++) begin
-        t_dec[t] += DecW'(gdone_fire[g] & gdone_self[g] & (gdone_i[g].tix == tix_t'(t)));
+        t_dec_d[t] += DecW'(gdone_valid_i[g] & gdone_self[g] & (gdone_i[g].tix == tix_t'(t)));
       end
       for (int unsigned d = 0; d < NumDir; d++) begin
-        t_dec[t] += DecW'(nb_ret_valid_i[d] & (nb_ret_i[d] == tix_t'(t)));
+        t_dec_d[t] += DecW'(nb_ret_valid_i[d] & (nb_ret_i[d] == tix_t'(t)));
       end
     end
   end
@@ -652,9 +723,15 @@ module tsched_domain import tsched_pkg::*; #(
       assert (!(load_valid_i && ld_active_q && !ld_take))
         else $error("[tsched_domain %0d] load while a load is streaming", DomId);
       assert ((dma_done_i & ~ld_busy_q) == '0) else $error("[tsched_domain %0d] DMA completion without a chunk", DomId);
+      assert ($onehot0(cut_oh)) else $error("[tsched_domain %0d] block cut from two tasks", DomId);
+      assert ($onehot0(send_oh)) else $error("[tsched_domain %0d] block sent to two registers", DomId);
+      assert ((send_oh & ~gcred_q) == '0) else $error("[tsched_domain %0d] block sent to a full register", DomId);
+      assert ((sel_u | sel_n | sel_p) == (|cut_oh)) else $error("[tsched_domain %0d] decision without a task", DomId);
       for (int unsigned t = 0; t < T; t++) begin
-        assert (!(t_valid_q[t] && (32'(t_dec[t]) > 32'(t_out_q[t]) + 32'(cut_oh[t]))))
+        assert (!(t_valid_q[t] && (32'(t_dec_q[t]) > 32'(t_out_q[t]))))
           else $error("[tsched_domain %0d] task %0d: more completions than blocks running", DomId, t);
+        assert (!(cut_oh[t] && !t_avail_q[t]))
+          else $error("[tsched_domain %0d] task %0d: block cut without an eligible one", DomId, t);
       end
     end
   end

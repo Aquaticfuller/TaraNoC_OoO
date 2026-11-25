@@ -13,20 +13,22 @@ schedulers cut them into blocks and hand the blocks to idle PEs.
 | `scripts/gen_program.py` | Task programs for the testbench: random ones, and MoE layers cut as the system model cuts them |
 | `sim` | Simulation flow (VCS) |
 | `sysmodel` | Event-driven system model of the cluster |
-| `arch` | Generator of the architecture figure (draw.io) |
+| `arch` | Generator of the architecture figure (draw.io); the figure follows the RTL |
+| `syn` | Logic depth and size of the blocks with yosys |
 
 ## RTL blocks
 
 | Module | Role |
 |---|---|
 | `tsched_backend` | Cluster level: rename, window, handle file, load placement, run issue queue and port select |
-| `tsched_rename` | Handle rename and free list |
+| `tsched_rename` | Handle rename and free list, in a map stage and a dispatch stage |
 | `tsched_window` | Tasks in program order until they are done |
 | `tsched_handle_file` | State and lifetime of handles; releases a handle and its L1 slot when its last user is done |
 | `tsched_load_issue` | Loads in program order, each to the least loaded domain that can stream now |
 | `tsched_run_iq` | Runs wait for their handles; the oldest ready one goes to the domain that holds its data |
 | `tsched_domain` | Domain scheduler: block cutting, stream following, dispatch, lending to neighbours, join counters |
 | `tsched_group_disp` | Group dispatcher: next-block register per PE class, PE start and completion |
+| `tsched_age_sel`, `tsched_rr_sel`, `tsched_argmin`, `tsched_oh_mux` | Selects: oldest first, round robin with a one-hot grant, minimum search, one-hot multiplexer |
 | `tsched_cluster`, `tsched_top` | Domain mesh, group dispatchers, registered links to the cluster level |
 
 Sizes are in `hw/src/tsched_pkg.sv`; each can be overridden with a define.

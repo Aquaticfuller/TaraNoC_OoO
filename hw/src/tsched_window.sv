@@ -80,7 +80,12 @@ module tsched_window import tsched_pkg::*; (
       done_d[tail_q] = 1'b0;
       tail_d         = inc(tail_q);
     end
-    cnt_d = cnt_q + CntW'(alloc_valid_i) - CntW'(retire);
+    // Allocation arrives late (it waits for the checks of the dispatch stage), so it only selects.
+    unique case ({alloc_valid_i, retire})
+      2'b10:   cnt_d = cnt_q + CntW'(1);
+      2'b01:   cnt_d = cnt_q - CntW'(1);
+      default: cnt_d = cnt_q;
+    endcase
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
