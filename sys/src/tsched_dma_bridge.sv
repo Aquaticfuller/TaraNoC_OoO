@@ -20,8 +20,10 @@
 //                          + i * GroupBytes                          next piece one row of L1 further
 //   pieces       len / GroupBytes, each GroupBytes long
 //
-// with g the group in its domain and i its id in the cluster. Every PE reads the load at the same global
-// addresses; with one domain the slot is simply contiguous.
+// with i the id of the group in the cluster (Z-order, tsched_sys_pkg) and g = i mod 4 its place in its
+// domain, the order in which the address windows of the cluster lay a domain out. The scheduler's own
+// group index is converted here. A PE reads the slot as one contiguous range through such a window.
+// A chunk must be whole stripes: the length of a load is a multiple of 4 * ChunksPerGroup * GroupBytes.
 
 module tsched_dma_bridge import tsched_pkg::*; #(
   parameter  int unsigned GroupBytes = 512,     // bytes of one group in a row of L1, a power of two
@@ -45,23 +47,23 @@ module tsched_dma_bridge import tsched_pkg::*; #(
   input  logic     [NumGroups-1:0]  hw_done_i
 );
 
-  assign hw_valid_o  = dma_valid_i;
-  assign dma_ready_o = hw_ready_i;
-  assign dma_done_o  = hw_done_i;
-
-  for (genvar i = 0; i < NumGroups; i++) begin : gen_group
-    localparam int unsigned G = i % GroupsPerDomain;
+  for (genvar r = 0; r < NumGroups; r++) begin : gen_group
+    localparam int unsigned I = tsched_sys_pkg::zid_of_group(r);   // the group in the cluster
+    localparam int unsigned G = I % GroupsPerDomain;               // its place in its domain
     logic [HwAddrW-1:0] in_slot;
+    assign hw_valid_o[I]  = dma_valid_i[r];
+    assign dma_ready_o[r] = hw_ready_i[I];
+    assign dma_done_o[r]  = hw_done_i[I];
     // Byte of the load inside the slot area of its domain.
-    assign in_slot = HwAddrW'(dma_i[i].slot) * HwAddrW'(SlotBytes) + HwAddrW'(dma_i[i].off);
+    assign in_slot = HwAddrW'(dma_i[r].slot) * HwAddrW'(SlotBytes) + HwAddrW'(dma_i[r].off);
     always_comb begin
-      hw_req_o[i]            = '0;
-      hw_req_o[i].src        = HwAddrW'(dma_i[i].addr) + HwAddrW'(dma_i[i].off) + HwAddrW'(G * GroupBytes);
-      hw_req_o[i].dst        = slot_base_i + (in_slot << DomShift) + HwAddrW'(i * GroupBytes);
-      hw_req_o[i].len        = GroupBytes;
-      hw_req_o[i].src_stride = GroupsPerDomain * GroupBytes;
-      hw_req_o[i].dst_stride = NumGroups * GroupBytes;
-      hw_req_o[i].reps       = 32'(dma_i[i].len >> GrpShift);
+      hw_req_o[I]            = '0;
+      hw_req_o[I].src        = HwAddrW'(dma_i[r].addr) + HwAddrW'(dma_i[r].off) + HwAddrW'(G * GroupBytes);
+      hw_req_o[I].dst        = slot_base_i + (in_slot << DomShift) + HwAddrW'(I * GroupBytes);
+      hw_req_o[I].len        = GroupBytes;
+      hw_req_o[I].src_stride = GroupsPerDomain * GroupBytes;
+      hw_req_o[I].dst_stride = NumGroups * GroupBytes;
+      hw_req_o[I].reps       = 32'(dma_i[r].len >> GrpShift);
     end
   end
 

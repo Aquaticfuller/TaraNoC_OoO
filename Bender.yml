@@ -12,6 +12,7 @@ dependencies:
   mempool: { git: "https://github.com/liyinrong/TeraNoC.git", rev: monster-dev }
 
 sources:
+  - sys/src/tsched_sys_pkg.sv
   - sys/src/tsched_disp_bridge.sv
   - sys/src/tsched_dma_bridge.sv
 

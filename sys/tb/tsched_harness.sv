@@ -126,6 +126,7 @@ module tsched_harness import tsched_pkg::*; #(
   // Program
   // ---------------------------------------------------------------------------------------------
   tinstr_t     prog [$];
+  int unsigned req_blocks, req_chunks;   // what the program asks for in total
   string       dir;
   int unsigned lane_bpc100 = 6016;    // bytes per 100 cycles of one stream lane
   int unsigned timeout     = 2000000; // cycles without a start or a completion
@@ -149,8 +150,22 @@ module tsched_harness import tsched_pkg::*; #(
             addr: addr[AddrW-1:0]};
       prog.push_back(i);
     end
+    // A line that is not 15 numbers ends the loop: that is an error, not the end of the program.
+    if (!$feof(fd)) $fatal(1, "[tsched] %s/prog.txt: line %0d is not 15 numbers", dir, prog.size() + 1);
     $fclose(fd);
-    $display("[tsched] %0d instructions from %s", prog.size(), dir);
+    if (prog.size() == 0) $fatal(1, "[tsched] %s/prog.txt holds no instruction", dir);
+    // What the DMA bridge can copy: whole stripes per chunk, at most one slot.
+    foreach (prog[k]) begin
+      if ((prog[k].op == TLoad) && !$test$plusargs("DMA_MODEL") &&
+          ((int'(prog[k].len) % (GroupsPerDomain * ChunksPerGroup * GroupBytes) != 0) || (prog[k].len == 0) || (int'(prog[k].len) > SlotBytes)))
+        $fatal(1, "[tsched] instruction %0d: a load of %0d bytes is not a multiple of %0d bytes or exceeds a slot of %0d",
+               k, prog[k].len, GroupsPerDomain * ChunksPerGroup * GroupBytes, SlotBytes);
+    end
+    foreach (prog[k]) begin
+      if (prog[k].op == TRun)  req_blocks += int'(prog[k].nblk);
+      if (prog[k].op == TLoad) req_chunks += GroupsPerDomain * ChunksPerGroup;
+    end
+    $display("[tsched] %0d instructions from %s: %0d blocks, %0d chunks", prog.size(), dir, req_blocks, req_chunks);
     loaded = 1'b1;
   end
 
@@ -222,10 +237,11 @@ module tsched_harness import tsched_pkg::*; #(
       for (int g = 0; g < NumGroups; g++) begin
         if (dma_valid[g] && dma_ready[g] && (st_load_first == 0)) st_load_first = cycle;
         if (dma_valid[g] && dma_ready[g] && trace)
-          $display("[tsched] T %0d chunk issued group %0d chunk %0d slot %0d", cycle, g, dma[g].chunk, dma[g].slot);
+          $display("[tsched] T %0d chunk issued group %0d chunk %0d slot %0d domain %0d", cycle, g, dma[g].chunk, dma[g].slot, dom_of_group(g));
         if (dma_done[g]) begin
           st_chunks++;
           st_load_last = cycle;
+          last_event   = cycle;
           if (trace) $display("[tsched] T %0d chunk done group %0d", cycle, g);
         end
       end
@@ -235,7 +251,11 @@ module tsched_harness import tsched_pkg::*; #(
   // ---------------------------------------------------------------------------------------------
   // Statistics and end of the test
   // ---------------------------------------------------------------------------------------------
-  int unsigned     st_start [NumCls], st_done [NumCls];
+  int unsigned     st_start [NumCls], st_done [NumCls], st_away [NumCls];
+  // Domain of the scheduler's group g (groups are numbered row by row, tsched_cluster).
+  function automatic int unsigned dom_of_group(input int unsigned g);
+    return ((g / (2 * DomPerSide)) / 2) * DomPerSide + (g % (2 * DomPerSide)) / 2;
+  endfunction
   longint unsigned st_busy  [NumCls];
   longint unsigned t_start  [NumGroups][NumPes];
   longint unsigned first_start;
@@ -255,8 +275,10 @@ module tsched_harness import tsched_pkg::*; #(
             t_start[g][p] = cycle;
             last_event    = cycle;
             if (first_start == 0) first_start = cycle;
-            if (trace) $display("[tsched] T %0d start %s group %0d pe %0d kernel %0d block %0d of %0d", cycle,
-                                (c == ClsT) ? "tensor" : "vector", g, p, pe_blk[g][c].kern, pe_blk[g][c].bidx, pe_blk[g][c].nblk);
+            if (trace) $display("[tsched] T %0d start %s group %0d pe %0d kernel %0d block %0d of %0d domain %0d data %0d", cycle,
+                                (c == ClsT) ? "tensor" : "vector", g, p, pe_blk[g][c].kern, pe_blk[g][c].bidx, pe_blk[g][c].nblk,
+                                dom_of_group(g), pe_blk[g][c].dom);
+            if (dom_of_group(g) != int'(pe_blk[g][c].dom)) st_away[c]++;
           end
           if (pe_done_valid[g][p] && pe_done_ready[g][p]) begin
             st_done[c]++;
@@ -272,10 +294,17 @@ module tsched_harness import tsched_pkg::*; #(
         $display("[tsched] RESULT blocks_tensor=%0d blocks_vector=%0d done_tensor=%0d done_vector=%0d chunks=%0d",
                  st_start[ClsT], st_start[ClsV], st_done[ClsT], st_done[ClsV], st_chunks);
         $display("[tsched] RESULT first_chunk_issued=%0d last_chunk_done=%0d", st_load_first, st_load_last);
+        $display("[tsched] RESULT blocks_run_outside_the_domain_of_their_task tensor=%0d vector=%0d", st_away[ClsT], st_away[ClsV]);
         $display("[tsched] RESULT mean_cycles_tensor=%0d mean_cycles_vector=%0d",
                  st_done[ClsT] ? st_busy[ClsT] / st_done[ClsT] : 0, st_done[ClsV] ? st_busy[ClsV] / st_done[ClsV] : 0);
-        if ((st_start[ClsT] == st_done[ClsT]) && (st_start[ClsV] == st_done[ClsV])) $display("[tsched] PASS");
-        else                                                                      $display("[tsched] FAIL: blocks started and done differ");
+        if ((st_start[ClsT] != st_done[ClsT]) || (st_start[ClsV] != st_done[ClsV]))
+          $display("[tsched] FAIL: blocks started and done differ");
+        else if (st_start[ClsT] + st_start[ClsV] != req_blocks)
+          $display("[tsched] FAIL: %0d blocks ran, the program has %0d", st_start[ClsT] + st_start[ClsV], req_blocks);
+        else if (st_chunks != req_chunks)
+          $display("[tsched] FAIL: %0d chunks were copied, the program has %0d", st_chunks, req_chunks);
+        else
+          $display("[tsched] PASS");
         $finish;
       end
       if (cycle - last_event > timeout) begin

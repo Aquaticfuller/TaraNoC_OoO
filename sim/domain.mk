@@ -18,9 +18,17 @@ ROOT    := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 TM      := $(ROOT)/working_dir/mempool
 CONFIG  ?= domain_2x2
 BUILD   ?= $(ROOT)/sim/build/domain
+override BUILD := $(abspath $(BUILD))
 APP     ?= tsched_agent
 ARGS    ?=
 DEFS    ?=
+# Domains per side of the scheduler; must match the cluster configuration (1: domain_2x2, 2: cluster_4x4).
+SIDE    ?= 1
+# The harness ends a run with FAIL after this many cycles without a start or a completion of a block.
+TIMEOUT ?= 300000
+# The program must print "check PASS" (the programs that compute and check a matrix). CHECK=0: no such line
+# is expected (probes, loads without a check).
+CHECK   ?= 1
 # Toolchains (LLVM, GCC, Bender 0.31 for the software flow) of an existing TeraMonster installation.
 TOOLS   ?= /usr/scratch/badile48/msc26f31/teranoc/TeraNoC/install
 # The FlooNoC generator needs Python 3.10 or newer with pydantic, networkx, mako, ruamel.yaml and click.
@@ -30,16 +38,16 @@ PYBIN   := $(ROOT)/working_dir/bin
 ENV     = PATH=$(PYBIN):$$PATH FLOO_DIR=$$(cd $(ROOT) && bender path floo_noc 2>/dev/null | tail -1)
 # The scheduler has one domain here, and the testbench of the cluster hardware gets our harness as its
 # external dispatcher.
-VLOGAN  := -assert svaext +v2k -override_timescale=1ns/1ps +define+TSCHED_DOM_PER_SIDE=1 +define+EXT_DISPATCH=tsched_harness $(DEFS)
+VLOGAN  := -assert svaext +v2k -override_timescale=1ns/1ps +define+TSCHED_DOM_PER_SIDE=$(SIDE) +define+EXT_DISPATCH=tsched_harness $(DEFS)
 # Program of task instructions for the host model (a directory with prog.txt, from scripts/gen_program.py).
-# sys/prog/gemm: one load of a tile into an L1 slot by the DMA engines, one task of eight matrix blocks for the
-# tensor engines that follows the load, twelve placeholder blocks for the vector units, then a block that checks
-# the result. Before a run, scripts/link_prog.py resolves the symbols of the program (the L2 address of the tile)
+# sys/prog/gemm: a warm-up task, one load of a tile into an L1 slot by the DMA engines, one task of eight matrix
+# blocks for the tensor engines that follows the load, twelve placeholder blocks for the vector units, then 16
+# blocks that check the result and one that reports it. sys/prog/gemm4 is the same for four domains. Before a run, scripts/link_prog.py resolves the symbols of the program (the L2 address of the tile)
 # against the PE program and tells where its L1 slots are.
 PROG    ?= $(ROOT)/sys/prog/gemm
 LINKED  := $(BUILD)/prog
 HWMAKE  = $(ENV) $(MAKE) -C $(TM)/hardware config=$(CONFIG) buildpath=$(BUILD) bender="bender -d $(ROOT)" \
-          vlogan_args="$(VLOGAN)" vcs_args="+PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(LINKED) $(PLUS) -assert nopostproc $(ARGS)"
+          vlogan_args="$(VLOGAN)" vcs_args="+PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(LINKED) $$PLUS +TIMEOUT=$(TIMEOUT) -assert nopostproc $(ARGS)"
 
 .PHONY: setup hw sw run
 
@@ -57,6 +65,15 @@ sw:
 # The cores never leave their PE loop, so the cluster testbench reports no end of computation; the harness
 # ends the run and prints the verdict.
 run: sw
-	$(eval PLUS := $(shell python3 $(ROOT)/scripts/link_prog.py $(PROG)/prog.txt $(TM)/software/bin/apps/baremetal/$(APP) $(LINKED)))
-	-$(HWMAKE) simcvcs > $(BUILD)/run.log 2>&1
-	@grep -E '\[tsched\]|\[UART\]' $(BUILD)/transcript; grep -q '\[tsched\] PASS' $(BUILD)/transcript && ! grep -q 'check FAIL' $(BUILD)/transcript
+	mkdir -p $(BUILD) && rm -f $(BUILD)/transcript $(BUILD)/run.log
+	@PLUS=$$($(PYBIN)/python3 $(ROOT)/scripts/link_prog.py $(PROG)/prog.txt $(TM)/software/bin/apps/baremetal/$(APP) $(LINKED)) \
+	  || { echo "verdict: FAIL (the program could not be linked)"; exit 1; }; \
+	  echo "simulating $(PROG) with $$PLUS"; \
+	  $(HWMAKE) simcvcs > $(BUILD)/run.log 2>&1 || true
+	@test -f $(BUILD)/transcript || { echo "no transcript: the simulation did not run, see $(BUILD)/run.log"; exit 1; }
+	@grep -E '^\[tsched\] (RESULT|PASS|FAIL|DMA)|^\[tsched\] [0-9]+ instr|\[UART\]' $(BUILD)/transcript; \
+	  grep -q '\[tsched\] PASS' $(BUILD)/transcript || { echo "verdict: FAIL (no PASS of the harness)"; exit 1; }; \
+	  ! grep -q 'check FAIL' $(BUILD)/transcript || { echo "verdict: FAIL (the result check failed)"; exit 1; }; \
+	  ! grep -q -E '^Error|Offending|\[tsched_[a-z_]+( [0-9]+)?\]|\[mempool_idma_group\]|Missed wake-up' $(BUILD)/transcript || { echo "verdict: FAIL (assertion or lost wake-up messages in the transcript)"; exit 1; }; \
+	  test "$(CHECK)" = 0 || grep -q 'check PASS' $(BUILD)/transcript || { echo "verdict: FAIL (no check PASS line)"; exit 1; }; \
+	  if test "$(CHECK)" = 0; then echo "verdict: PASS (no result check in this program)"; else echo "verdict: PASS (result check passed)"; fi

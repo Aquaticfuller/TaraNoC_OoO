@@ -7,6 +7,8 @@
 // In the cluster a PE is a core. Core 0 of a tile has no vector unit and drives the tile's tensor
 // engine: it is the tensor PE of that tile. The other cores of a tile have a vector unit each: they are
 // the vector PEs. A group dispatcher numbers its PEs tensor engines first, then vector units.
+// The scheduler and the cluster number groups and domains differently (tsched_sys_pkg); the cores of the
+// scheduler's group g are those of the cluster's group zid_of_group(g).
 //
 // The dispatcher starts a PE with a pulse and holds the block of each PE class on a bus. The core side
 // takes a pulse per core with a descriptor of DispWidth bits, which a small register block in the tile
@@ -15,7 +17,8 @@
 // Descriptor, as the software of the core reads it (three words):
 //   word 0  [31:0]  argument of the kernel
 //   word 1  [7:0]   kernel     [17:8] index of the block     [27:18] blocks of the task    [28] PE class
-//   word 2  [7:0]   domain that holds the data   [8] the task has data in a slot   [15:12] slot
+//   word 2  [7:0]   domain that holds the data, as the cluster numbers it   [8] the task has data in a
+//                   slot   [15:12] slot
 //           [23:16] index of the task in that domain
 
 module tsched_disp_bridge import tsched_pkg::*; #(
@@ -50,13 +53,13 @@ module tsched_disp_bridge import tsched_pkg::*; #(
     w    = '0;
     w[0] = 32'(b.arg);
     w[1] = {3'b0, b.pcls, 10'(b.nblk), 10'(b.bidx), 8'(b.kern)};
-    w[2] = {8'b0, 8'(b.tix), 4'(b.slot), 3'b0, b.slot_v, 8'(b.dom)};
+    w[2] = {8'b0, 8'(b.tix), 4'(b.slot), 3'b0, b.slot_v, tsched_sys_pkg::zdom(b.dom)};
     return w;
   endfunction
 
   for (genvar g = 0; g < NumGroups; g++) begin : gen_group
     for (genvar p = 0; p < NumPes; p++) begin : gen_pe
-      localparam int unsigned Core = g * CoresPerGroup + core_of(p);
+      localparam int unsigned Core = tsched_sys_pkg::zid_of_group(g) * CoresPerGroup + core_of(p);
       localparam int unsigned Cls  = (p < NumTensor) ? ClsT : ClsV;
       assign disp_start_o[Core]      = pe_start_i[g][p];
       assign disp_desc_o[Core]       = DispWidth'(pack(pe_blk_i[g][Cls]));
