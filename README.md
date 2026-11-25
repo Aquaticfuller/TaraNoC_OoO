@@ -49,7 +49,7 @@ Until those branches exist on the remotes, the system package can only be built 
 
 | Dependency | Remote | Base revision | Local change |
 |---|---|---|---|
-| `mempool` | liyinrong/TeraNoC, branch `monster-dev` | c76265fac3 | one-domain configuration `config/domain_2x2.mk` |
+| `mempool` | liyinrong/TeraNoC, branch `monster-dev` | c76265fac3 | one-domain configuration `config/domain_2x2.mk`; hardware dispatch of the cores (`fsync_shim`); hardware request port of the group DMA engines (`mempool_idma_group`); PE program `tsched_agent` |
 | `cluster_icache` | pulp-platform/cluster_icache | 1642961b95 | TeraMonster's change (its `hardware/deps/patches`) |
 | `floo_noc` | pulp-platform/FlooNoC | 14c253c996 | same |
 | `fpnew` | pulp-platform/cvfpu | 841b19b9fc | same |

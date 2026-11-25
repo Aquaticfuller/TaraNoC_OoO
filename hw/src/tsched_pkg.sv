@@ -229,12 +229,16 @@ package tsched_pkg;
     blk_t b;
   } rblk_t;
 
-  // One chunk of a load, to the DMA engine of a group.
+  // One chunk of a load, to the DMA engine of a group. A load is laid out in rows that run across the
+  // groups of the domain, so that a prefix of the load is a prefix in every group. Chunk `chunk` covers the
+  // bytes [off, off + GroupsPerDomain * len) of the load; a group moves its `len` bytes of them. Where
+  // these bytes are in L2 and in the slot is for the DMA engine's side to work out from `addr` and `off`.
   typedef struct packed {
     slot_t             slot;
     logic [ChunkW-1:0] chunk;
     len_t              len;
-    addr_t             addr;
+    len_t              off;
+    addr_t             addr;    // L2 address of the load
   } dma_req_t;
 
   // ---------------------------------------------------------------------------------------------

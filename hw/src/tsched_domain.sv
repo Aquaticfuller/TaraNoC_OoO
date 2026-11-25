@@ -83,7 +83,8 @@ module tsched_domain import tsched_pkg::*; #(
   wid_t                    ld_wid_q;
   slot_t                   ld_slot_q;
   len_t                    ld_clen_q;
-  addr_t [G-1:0]           ld_ptr_q;
+  addr_t                   ld_addr_q;
+  len_t  [G-1:0]           ld_off_q;      // offset in the load of the next chunk of each group
   logic  [G-1:0]           ld_busy_d, ld_busy_q;
   logic  [G-1:0][TickW-1:0] ld_issued_d, ld_issued_q, ld_cdone_d, ld_cdone_q;
   logic  [TickW-1:0]       ld_prog_d, ld_prog_q;
@@ -93,7 +94,7 @@ module tsched_domain import tsched_pkg::*; #(
 
   for (genvar g = 0; g < G; g++) begin : gen_dma
     assign dma_valid_o[g] = ld_active_q & ~ld_busy_q[g] & (ld_issued_q[g] != TickW'(C));
-    assign dma_o[g]       = '{slot: ld_slot_q, chunk: ld_issued_q[g][ChunkW-1:0], len: ld_clen_q, addr: ld_ptr_q[g]};
+    assign dma_o[g]       = '{slot: ld_slot_q, chunk: ld_issued_q[g][ChunkW-1:0], len: ld_clen_q, off: ld_off_q[g], addr: ld_addr_q};
     assign dma_fire[g]    = dma_valid_o[g] & dma_ready_i[g];
   end
 
@@ -147,11 +148,12 @@ module tsched_domain import tsched_pkg::*; #(
       ld_wid_q  <= load_i.wid;
       ld_slot_q <= load_i.slot;
       ld_clen_q <= load_i.len >> (GrpW + ChunkW);
-      // Group g streams the g-th quarter of the load.
-      for (int unsigned g = 0; g < G; g++) ld_ptr_q[g] <= load_i.addr + AddrW'(g) * AddrW'(load_i.len >> GrpW);
+      ld_addr_q <= load_i.addr;
+      ld_off_q  <= '0;
     end else begin
+      // A chunk spans all groups of the domain: the next one starts G chunk lengths further.
       for (int unsigned g = 0; g < G; g++) begin
-        if (dma_fire[g]) ld_ptr_q[g] <= ld_ptr_q[g] + AddrW'(ld_clen_q);
+        if (dma_fire[g]) ld_off_q[g] <= ld_off_q[g] + LenW'(ld_clen_q << GrpW);
       end
     end
   end

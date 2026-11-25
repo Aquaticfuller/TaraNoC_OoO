@@ -31,11 +31,14 @@ ENV     = PATH=$(PYBIN):$$PATH FLOO_DIR=$$(cd $(ROOT) && bender path floo_noc 2>
 # external dispatcher.
 VLOGAN  := -assert svaext +v2k -override_timescale=1ns/1ps +define+TSCHED_DOM_PER_SIDE=1 +define+EXT_DISPATCH=tsched_harness
 # Program of task instructions for the host model (a directory with prog.txt, from scripts/gen_program.py).
-# sys/prog/gemm: one load, one task of four matrix blocks for the tensor engines, twelve placeholder blocks for
-# the vector units, then a block that checks the result.
+# sys/prog/gemm: one load of a tile into an L1 slot by the DMA engines, one task of eight matrix blocks for the
+# tensor engines that follows the load, twelve placeholder blocks for the vector units, then a block that checks
+# the result. Before a run, scripts/link_prog.py resolves the symbols of the program (the L2 address of the tile)
+# against the PE program and tells where its L1 slots are.
 PROG    ?= $(ROOT)/sys/prog/gemm
+LINKED  := $(BUILD)/prog
 HWMAKE  = $(ENV) $(MAKE) -C $(TM)/hardware config=$(CONFIG) buildpath=$(BUILD) bender="bender -d $(ROOT)" \
-          vlogan_args="$(VLOGAN)" vcs_args="+PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(PROG) -assert nopostproc $(ARGS)"
+          vlogan_args="$(VLOGAN)" vcs_args="+PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(LINKED) $(PLUS) -assert nopostproc $(ARGS)"
 
 .PHONY: setup hw sw run
 
@@ -53,5 +56,6 @@ sw:
 # The cores never leave their PE loop, so the cluster testbench reports no end of computation; the harness
 # ends the run and prints the verdict.
 run: sw
+	$(eval PLUS := $(shell python3 $(ROOT)/scripts/link_prog.py $(PROG)/prog.txt $(TM)/software/bin/apps/baremetal/$(APP) $(LINKED)))
 	-$(HWMAKE) simcvcs > $(BUILD)/run.log 2>&1
 	@grep -E '\[tsched\]|\[UART\]' $(BUILD)/transcript; grep -q '\[tsched\] PASS' $(BUILD)/transcript && ! grep -q 'check FAIL' $(BUILD)/transcript

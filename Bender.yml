@@ -13,6 +13,7 @@ dependencies:
 
 sources:
   - sys/src/tsched_disp_bridge.sv
+  - sys/src/tsched_dma_bridge.sv
 
   # Compiled together with the testbench of the cluster hardware, which instantiates the harness.
   - target: all(simulation, mempool_vsim)
