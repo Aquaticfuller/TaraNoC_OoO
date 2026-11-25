@@ -56,7 +56,8 @@ module tsched_backend import tsched_pkg::*; (
   riq_push_t   riq;
   logic        alloc_valid;
   phys_t       alloc;
-  logic        issue_valid, issue_any;
+  logic        grant_valid, grant_any, issue_valid;
+  dom_t        grant_dom;
   phys_t       issue_s1;
   run_req_t    issue;
   logic  [1:0] unmap_valid;
@@ -183,13 +184,15 @@ module tsched_backend import tsched_pkg::*; (
     blk_out_d = blk_out_q;
     cred_d    = cred_q;
     for (int unsigned d = 0; d < NumDomains; d++) begin
-      logic inc, dec;
-      inc = issue_valid & (issue_dom == dom_t'(d));
+      logic gnt, iss, dec;
+      gnt = grant_valid & (grant_dom == dom_t'(d));
+      iss = issue_valid & (issue_dom == dom_t'(d));
       dec = run_done & (dn_src_q == DnW'(d));
-      blk_out_d[d] = blk_out_q[d] + (inc ? BlkCntW'(issue.nblk) : '0) - (dec ? BlkCntW'(dn_q.nblk) : '0);
-      cred_d[d]    = cred_q[d] + CredW'(dec) - CredW'(inc);
-      // The task in the issue register has not taken its credit yet.
-      credit_ok[d] = (cred_q[d] > CredW'(1)) | ((cred_q[d] == CredW'(1)) & ~inc);
+      // Blocks are counted when the task is read from its entry, credits one stage earlier.
+      blk_out_d[d] = blk_out_q[d] + (iss ? BlkCntW'(issue.nblk) : '0) - (dec ? BlkCntW'(dn_q.nblk) : '0);
+      cred_d[d]    = cred_q[d] + CredW'(dec) - CredW'(gnt);
+      // The task in the grant stage has not taken its credit yet.
+      credit_ok[d] = (cred_q[d] > CredW'(1)) | ((cred_q[d] == CredW'(1)) & ~gnt);
     end
   end
 
@@ -229,12 +232,13 @@ module tsched_backend import tsched_pkg::*; (
   // Runs
   // -------------------------------------------------------------------------------------------
   // Domain for a task without placed data: the least loaded one that has a credit. The choice is two
-  // cycles old, so after such a task is issued the next one waits until the choice has seen it.
+  // cycles old and the blocks of a task are counted two cycles after its grant, so after such a task is
+  // granted the next one waits until the choice has seen it.
   logic [NumDomains-1:0][KeyW-1:0] any_key;
   logic                            any_v;
   dom_t                            any_dom;
   dom_t                            any_rot_q;
-  logic [1:0]                      any_hold_q;
+  logic [3:0]                      any_hold_q;
 
   for (genvar d = 0; d < NumDomains; d++) begin : gen_any_key
     assign any_key[d] = {blk_out_q[d], dom_t'(DomW'(d) - any_rot_q)};
@@ -257,16 +261,16 @@ module tsched_backend import tsched_pkg::*; (
       any_rot_q  <= '0;
       any_hold_q <= '0;
     end else begin
-      any_hold_q <= {any_hold_q[0], 1'b0};
-      if (issue_valid && issue_any) begin
-        any_rot_q  <= issue_dom + dom_t'(PlaceStride);
-        any_hold_q <= 2'b11;
+      any_hold_q <= {any_hold_q[2:0], 1'b0};
+      if (grant_valid && grant_any) begin
+        any_rot_q  <= grant_dom + dom_t'(PlaceStride);
+        any_hold_q <= '1;
       end
     end
   end
 
   logic any_ok;
-  assign any_ok = any_v & credit_ok[any_dom] & ~(|any_hold_q) & ~(issue_valid & issue_any);
+  assign any_ok = any_v & credit_ok[any_dom] & ~(|any_hold_q) & ~(grant_valid & grant_any);
 
   tsched_run_iq i_run_iq (
     .clk_i,
@@ -281,8 +285,10 @@ module tsched_backend import tsched_pkg::*; (
     .credit_ok_i   (credit_ok),
     .any_ok_i      (any_ok),
     .any_dom_i     (any_dom),
+    .grant_valid_o (grant_valid),
+    .grant_any_o   (grant_any),
+    .grant_dom_o   (grant_dom),
     .issue_valid_o (issue_valid),
-    .issue_any_o   (issue_any),
     .issue_dom_o   (issue_dom),
     .issue_s1_o    (issue_s1),
     .issue_o       (issue)
@@ -351,7 +357,7 @@ module tsched_backend import tsched_pkg::*; (
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       for (int unsigned d = 0; d < NumDomains; d++) begin
-        assert (!(issue_valid && (issue_dom == dom_t'(d)) && (cred_q[d] == '0)))
+        assert (!(grant_valid && (grant_dom == dom_t'(d)) && (cred_q[d] == '0)))
           else $error("[tsched_backend] task issued to domain %0d without a credit", d);
       end
     end

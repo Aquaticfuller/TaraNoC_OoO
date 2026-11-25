@@ -13,6 +13,10 @@
 //           stream gets its blocks eligible in proportion to that progress.
 // Dispatch  One block per cycle goes to a next-block register of a group dispatcher. A register with an
 //           idle PE behind it is served before a register that only prepares the next block.
+//           The decision (which task, for whom) and the block itself are one register stage apart: the
+//           counters of the task move with the decision, the fields of the block are read from the
+//           task table in the next cycle. A task with a block running stays in the table, so these
+//           fields are stable for that read.
 // Lending   A domain whose idle PEs find no block asks one neighbour at a time. A neighbour hands out a
 //           block of its own tasks when none of its own idle PEs can take it. The completion of a lent
 //           block returns to the lender, which keeps the join counter.
@@ -300,11 +304,25 @@ module tsched_domain import tsched_pkg::*; #(
     assign pre[g] = gcred_q[g] & ~idle_i[g];
   end
 
-  // A lent block waits in a register per direction.
+  // The decision taken in the previous cycle.
+  logic            d_v_q;            // a block was decided
+  logic            d_bor_q;          // it is a borrowed block, passed on to a group
+  logic            d_nb_q;           // it is lent to the neighbour in direction d_dir_q
+  logic [GrpW-1:0] d_grp_q;
+  logic            d_cls_q;
+  logic [1:0]      d_dir_q;
+  logic [T-1:0]    d_oh_q;           // task it is cut from, one-hot
+  nblk_t           d_bidx_q;
+  blk_t            d_bblk_q;         // the borrowed block
+
+  // A lent block waits in a register per direction. A register is free for a new decision if it is
+  // empty or being read, and the decision of the previous cycle is not on its way into it.
   logic [NumDir-1:0] lend_v_d, lend_v_q;
   blk_t [NumDir-1:0] lend_q;
   logic [NumDir-1:0] lend_free;
-  assign lend_free      = ~lend_v_q | nb_blk_ready_i;
+  for (genvar d = 0; d < NumDir; d++) begin : gen_lend_free
+    assign lend_free[d] = (~lend_v_q[d] | nb_blk_ready_i[d]) & ~(d_v_q & d_nb_q & (d_dir_q == 2'(d)));
+  end
   assign nb_blk_valid_o = lend_v_q;
   assign nb_blk_o       = lend_q;
 
@@ -406,70 +424,85 @@ module tsched_domain import tsched_pkg::*; #(
     w_dir = 2'(rel >> 1);
   end
 
-  // The block cut for the winner. The grant of the age select is one-hot.
-  blk_t cut_blk;
+  // The task the winner's block is cut from, and the index of that block. The grant of the age select
+  // is one-hot.
+  logic [T-1:0] cut_sel;
+  nblk_t        cut_bidx;
   always_comb begin
-    logic [T-1:0] oh;
-    oh      = w_nb ? sel_gnt[NumCls + 32'(w_cls)] : sel_gnt[32'(w_cls)];
-    cut_oh  = r_valid ? oh : '0;
-    cut_blk = '0;
-    for (int unsigned t = 0; t < T; t++) begin
-      if (oh[t]) begin
-        cut_blk.kern   = t_kern_q[t];
-        cut_blk.arg    = t_arg_q[t];
-        cut_blk.bidx   = t_next_q[t];
-        cut_blk.nblk   = t_nblk_q[t];
-        cut_blk.slot_v = t_slot_v_q[t];
-        cut_blk.slot   = t_slot_q[t];
-        cut_blk.tix    = tix_t'(t);
-      end
-    end
-    cut_blk.dom  = dom_t'(DomId);
-    cut_blk.pcls = w_cls;
+    cut_sel  = w_nb ? sel_gnt[NumCls + 32'(w_cls)] : sel_gnt[32'(w_cls)];
+    cut_oh   = r_valid ? cut_sel : '0;
+    cut_bidx = '0;
+    for (int unsigned t = 0; t < T; t++) cut_bidx |= {NblkW{cut_sel[t]}} & t_next_q[t];
   end
 
   // -------------------------------------------------------------------------------------------
   // Block outputs
   // -------------------------------------------------------------------------------------------
-  logic  [G-1:0] blk_valid_d;
-  gblk_t         blk_own, blk_bor;
-  logic          send_own, send_bor;
-  logic  [GrpW-1:0] send_grp;
-  logic          send_cls;
+  logic            send_own, send_bor;
+  logic [GrpW-1:0] send_grp;
+  logic            send_cls;
 
   assign send_bor = b_any;
   assign send_own = r_valid & ~w_nb;
-  assign blk_own  = '{owner: '0, b: cut_blk};
-  assign blk_bor  = '{owner: owner_t'(3'd1 + 3'(b_dir)), b: nb_blk_i[b_dir]};
   assign send_grp = send_bor ? b_grp : w_grp;
   assign send_cls = send_bor ? b_cls : w_cls;
 
+  // The block of the previous cycle's decision, read from the task table.
+  blk_t  asm_blk;
+  gblk_t out_blk;
   always_comb begin
-    blk_valid_d = '0;
-    gcred_d     = gcred_q | pop_i;
-    lend_v_d    = lend_v_q & ~nb_blk_ready_i;
-    if (send_bor || send_own) begin
-      blk_valid_d[send_grp]       = 1'b1;
-      gcred_d[send_grp][send_cls] = 1'b0;
+    asm_blk = '0;
+    for (int unsigned t = 0; t < T; t++) begin
+      if (d_oh_q[t]) begin
+        asm_blk.kern   = t_kern_q[t];
+        asm_blk.arg    = t_arg_q[t];
+        asm_blk.nblk   = t_nblk_q[t];
+        asm_blk.slot_v = t_slot_v_q[t];
+        asm_blk.slot   = t_slot_q[t];
+        asm_blk.tix    = tix_t'(t);
+      end
     end
-    if (r_valid && w_nb) lend_v_d[w_dir] = 1'b1;
+    asm_blk.bidx = d_bidx_q;
+    asm_blk.dom  = dom_t'(DomId);
+    asm_blk.pcls = d_cls_q;
+  end
+  assign out_blk = d_bor_q ? '{owner: owner_t'(3'd1 + 3'(d_dir_q)), b: d_bblk_q} : '{owner: '0, b: asm_blk};
+
+  always_comb begin
+    gcred_d  = gcred_q | pop_i;
+    lend_v_d = lend_v_q & ~nb_blk_ready_i;
+    if (send_bor || send_own) gcred_d[send_grp][send_cls] = 1'b0;
+    if (d_v_q && d_nb_q)      lend_v_d[d_dir_q]           = 1'b1;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
+      d_v_q       <= 1'b0;
       blk_valid_o <= '0;
       gcred_q     <= '1;
       lend_v_q    <= '0;
     end else begin
-      blk_valid_o <= blk_valid_d;
+      d_v_q       <= send_bor | r_valid;
+      blk_valid_o <= '0;
+      if (d_v_q && !d_nb_q) blk_valid_o[d_grp_q] <= 1'b1;
       gcred_q     <= gcred_d;
       lend_v_q    <= lend_v_d;
     end
   end
 
   always_ff @(posedge clk_i) begin
-    if (send_bor || send_own) blk_o[send_grp] <= send_bor ? blk_bor : blk_own;
-    if (r_valid && w_nb)      lend_q[w_dir]   <= cut_blk;
+    if (send_bor || r_valid) begin
+      d_bor_q  <= send_bor;
+      d_nb_q   <= ~send_bor & w_nb;
+      d_grp_q  <= send_grp;
+      d_cls_q  <= send_cls;
+      d_dir_q  <= send_bor ? b_dir : w_dir;
+      d_oh_q   <= cut_sel;
+      d_bidx_q <= cut_bidx;
+    end
+    if (send_bor) d_bblk_q <= nb_blk_i[b_dir];
+    if (d_v_q && !d_nb_q) blk_o[d_grp_q]  <= out_blk;
+    if (d_v_q && d_nb_q)  lend_q[d_dir_q] <= asm_blk;
   end
 
   // -------------------------------------------------------------------------------------------

@@ -15,9 +15,15 @@
 //   A task whose data is placed goes to the domain that holds the data (its home). The cluster level
 //   does not redirect such a task: PEs of other domains fetch single blocks from the home domain instead.
 //   A task without placed data goes to the domain any_dom_i (the least loaded one).
-//   The home port must have a credit. One task is issued per cycle and the issue is registered, so the
-//   credit and load counters are updated from that register one cycle after the grant; the port state
-//   given to this module already accounts for the task in the register.
+//   The home port must have a credit. One task is granted per cycle.
+//
+// Two register stages follow the grant, so that the wide read of the granted entry is not in the
+// select path:
+//   grant stage  which entry (one-hot) and which domain. The credit counters are updated from this
+//                stage, and the port state given to this module already accounts for the task in it.
+//   issue stage  the task itself, read from the entry. The entry is invalid from the grant on, and it
+//                cannot be filled again before the cycle after this read: the search for the next free
+//                entry sees it one cycle after the grant and reserves it one cycle later still.
 
 module tsched_run_iq import tsched_pkg::*; (
   input  logic                  clk_i,
@@ -35,9 +41,12 @@ module tsched_run_iq import tsched_pkg::*; (
   input  logic [NumDomains-1:0] credit_ok_i,
   input  logic                  any_ok_i,
   input  dom_t                  any_dom_i,
-  // issue, registered
+  // grant stage
+  output logic                  grant_valid_o,
+  output logic                  grant_any_o,     // the task goes to any_dom_i
+  output dom_t                  grant_dom_o,
+  // issue stage
   output logic                  issue_valid_o,
-  output logic                  issue_any_o,     // the task went to any_dom_i
   output dom_t                  issue_dom_o,
   output phys_t                 issue_s1_o,      // data handle of the task, valid if issue_o.slot_v
   output run_req_t              issue_o
@@ -141,29 +150,40 @@ module tsched_run_iq import tsched_pkg::*; (
     .gnt_o     (gnt)
   );
 
-  // The grant is one-hot, so the selected entry is an OR over the gated entries.
-  payload_t sel_payload;
-  phys_t    sel_s1;
-  dom_t     sel_dom;
-  slot_t    sel_slot;
-  logic     sel_placed, sel_follow;
+  // The grant is one-hot, so a field of the selected entry is an OR over the gated entries.
+  // Grant stage: only the domain, which is narrow.
+  logic [N-1:0] gnt_q;
+  dom_t         sel_dom;
+  logic         sel_placed;
   always_comb begin
-    sel_payload = '0;
-    sel_s1      = '0;
-    sel_dom     = '0;
-    sel_slot    = '0;
-    sel_placed  = 1'b0;
-    sel_follow  = 1'b0;
+    sel_dom    = '0;
+    sel_placed = 1'b0;
     for (int unsigned i = 0; i < N; i++) begin
-      sel_payload |= {$bits(payload_t){gnt[i]}} & payload_q[i];
-      sel_s1      |= {PhysW{gnt[i]}} & s1_q[i];
-      sel_dom     |= {DomW{gnt[i]}}  & dom_q[i];
-      sel_slot    |= {SlotW{gnt[i]}} & slot_q[i];
-      sel_placed  |= gnt[i] & s1_placed_q[i];
-      sel_follow  |= gnt[i] & s1_follow_q[i];
+      sel_dom    |= {DomW{gnt[i]}} & dom_q[i];
+      sel_placed |= gnt[i] & s1_placed_q[i];
     end
   end
   assign gnt_any = |gnt;
+
+  // Issue stage: the rest of the entry, selected by the registered grant.
+  payload_t rd_payload;
+  phys_t    rd_s1;
+  slot_t    rd_slot;
+  logic     rd_placed, rd_follow;
+  always_comb begin
+    rd_payload = '0;
+    rd_s1      = '0;
+    rd_slot    = '0;
+    rd_placed  = 1'b0;
+    rd_follow  = 1'b0;
+    for (int unsigned i = 0; i < N; i++) begin
+      rd_payload |= {$bits(payload_t){gnt_q[i]}} & payload_q[i];
+      rd_s1      |= {PhysW{gnt_q[i]}} & s1_q[i];
+      rd_slot    |= {SlotW{gnt_q[i]}} & slot_q[i];
+      rd_placed  |= gnt_q[i] & s1_placed_q[i];
+      rd_follow  |= gnt_q[i] & s1_follow_q[i];
+    end
+  end
 
   always_comb begin
     valid_d = (valid_q & ~gnt) | push_oh;
@@ -176,6 +196,8 @@ module tsched_run_iq import tsched_pkg::*; (
       s1_placed_q   <= '0;
       s1_done_q     <= '0;
       s2_done_q     <= '0;
+      gnt_q         <= '0;
+      grant_valid_o <= 1'b0;
       issue_valid_o <= 1'b0;
     end else begin
       valid_q       <= valid_d;
@@ -183,7 +205,9 @@ module tsched_run_iq import tsched_pkg::*; (
       s1_placed_q   <= s1_placed_d;
       s1_done_q     <= s1_done_d;
       s2_done_q     <= s2_done_d;
-      issue_valid_o <= gnt_any;
+      gnt_q         <= gnt;
+      grant_valid_o <= gnt_any;
+      issue_valid_o <= grant_valid_o;
     end
   end
 
@@ -202,12 +226,15 @@ module tsched_run_iq import tsched_pkg::*; (
       end
     end
     if (gnt_any) begin
-      issue_any_o <= ~sel_placed;
-      issue_dom_o <= sel_placed ? sel_dom : any_dom_i;
-      issue_s1_o  <= sel_s1;
-      issue_o     <= '{wid: sel_payload.wid, cls: sel_payload.cls, nblk: sel_payload.nblk,
-                       slot_v: sel_placed, follow: sel_placed & sel_follow, slot: sel_slot,
-                       kern: sel_payload.kern, arg: sel_payload.arg};
+      grant_any_o <= ~sel_placed;
+      grant_dom_o <= sel_placed ? sel_dom : any_dom_i;
+    end
+    if (grant_valid_o) begin
+      issue_dom_o <= grant_dom_o;
+      issue_s1_o  <= rd_s1;
+      issue_o     <= '{wid: rd_payload.wid, cls: rd_payload.cls, nblk: rd_payload.nblk,
+                       slot_v: rd_placed, follow: rd_placed & rd_follow, slot: rd_slot,
+                       kern: rd_payload.kern, arg: rd_payload.arg};
     end
   end
 
