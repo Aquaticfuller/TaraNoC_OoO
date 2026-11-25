@@ -18,8 +18,8 @@ SV2V    ?= sv2v
 YOSYS   ?= yosys-0.35 yosys
 BUILD   := $(ROOT)/syn/build
 DEFS    ?=
-MODULES ?= tsched_rename tsched_window tsched_handle_file tsched_run_iq tsched_load_issue tsched_backend \
-           tsched_group_disp tsched_domain
+MODULES ?= tsched_rename tsched_window tsched_handle_file tsched_run_iq tsched_load_issue tsched_balance \
+           tsched_backend tsched_group_disp tsched_domain
 
 .PHONY: depth clean
 

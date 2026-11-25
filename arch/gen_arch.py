@@ -180,6 +180,8 @@ for i, col in enumerate(fus):
 new(750, 846, 245, 58, '<b>Resource Counters</b>' + SMALL % 'per domain: 4 task credits, free slots,<br>DMA busy · cluster: 32 lanes, 4 per load')
 new(750, 912, 245, 38, '<b>Completion Arbiter</b>' + SMALL % '16 domains and TJoin · one per cycle')
 box(750, 958, 245, 32, '<b>16 task ports</b> · one per domain', fill=C['new_dk'], fc='#FFFFFF', sw=1.0)
+new(556, 950, 184, 94, '<b>Balancer</b>' + SMALL % 'moves single blocks from a domain with waiting blocks to a domain with idle PEs, at most 2 steps apart; one move per cycle')
+edge([(740, 974), (750, 974)], color=C['new_dk'], sw=2.2, size=3)
 box(750, 998, 245, 32, '<b>16 load ports</b> · one per domain', fill=C['new_dk'], fc='#FFFFFF', sw=1.0)
 box(40, 960, 500, 92, fill=C['cream'], tag='lsu')
 text(40, 962, 500, 26, 'Load Store Unit', bold=True, align='center')
@@ -197,15 +199,15 @@ flow([(290, 1052), (290, 1210)], sw=5, start='block')
 
 # ------------------------------------------------------------------ CPU <-> cluster
 edge([(1108, 300), (1022, 300), (1022, 931), (995, 931)], color=C['new_dk'], sw=2.2, dashed='6 4')
-rtext(1009, 610, 300, 'done · a task or a load · one per cycle', fs=12, tag='label-done')
+rtext(1009, 610, 330, 'done · a task, a load or a moved block · one per cycle', fs=12, tag='label-done')
 flow([(995, 974), (1050, 974), (1050, 360), (1108, 360)], color=C['new_dk'], sw=6)
-rtext(1037, 670, 420, 'TRun · kernel, blocks, slot · registered link, counted by credits', fs=12, tag='label-task')
+rtext(1037, 670, 470, 'TRun · kernel, blocks, slot · and the balancer: give commands, moved blocks', fs=12, tag='label-task')
 flow([(995, 1014), (1082, 1014), (1082, 440), (1108, 440)], color=C['new_dk'], sw=6)
 rtext(1069, 730, 470, 'TLoad · L2 address, length, L1 slot · four DMA engines copy one tile', fs=12, tag='label-load')
 
 # ------------------------------------------------------------------ (a) cluster overview
 text(1110, 74, 620, 30, '(a) Compute cluster · 8 × 8 groups · 16 %ss' % DOMAIN, fs=18, bold=True)
-text(1110, 102, 560, 44, 'A domain is a unit of scheduling: one task port, one load port and one domain scheduler.<br>A tile of weights lies in one domain; the mesh lets any PE read any domain.', fs=12.5, valign='top')
+text(1110, 102, 500, 44, 'A domain: one task port, one load port, one domain scheduler.<br>No links between domains: work moves through the CPU. Any PE reads any domain.', fs=12.5, valign='top')
 GX, GY, P, G = 1152, 180, 54, 36
 box(1108, 174, 20, 426, fill=C['new_dk'], stroke=C['new_dk'], arc=3, tag='task-port-bus')
 rtext(1118, 387, 420, '16 task ports and 16 load ports · one pair per domain scheduler', fs=11.5, fc='#FFFFFF', bold=True)
@@ -245,9 +247,9 @@ text(BX + 14, BY + 46, 432, 28, 'Domain Scheduler', bold=True, fs=15, align='cen
 rows = [(36, '<b>Task table</b> · 4 tasks · kernel, blocks, PE types, slot'),
         (46, '<b>Load unit</b> · one tile at a time · starts the 4 DMA engines' + SMALL % '8 chunks per engine · progress = chunks all four have finished'),
         (46, '<b>Block counters</b> per task · handed out, eligible, running' + SMALL % 'a task that follows a stream gets blocks as its tile arrives'),
-        (46, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % '1. register with an idle PE &nbsp;2. a neighbour &nbsp;3. prepare the next block'),
+        (46, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % '1. give command &nbsp;2. received block &nbsp;3. idle PE &nbsp;4. next block'),
         (36, '<b>Block read</b> · second stage: the fields of the block'),
-        (46, '<b>Lending</b> · to the 4 direct neighbour domains' + SMALL % 'one block register per direction · completions come back'),
+        (46, '<b>Give and take</b> · on command of the cluster level' + SMALL % 'reports idle PEs and spare blocks · gives one block per command'),
         (36, '<b>Done</b> → completion of a task or a load to the cluster level')]
 ry = BY + 80
 ry_disp = ry_lend = 0
@@ -260,7 +262,7 @@ for k, (h, s) in enumerate(rows):
     if k < len(rows) - 1:
         edge([(BX + 230, ry + h), (BX + 230, ry + h + 10)], sw=1.4, size=3.5)
     ry += h + 10
-text(BX + 26, ry - 4, 408, 40, 'RTL version 1: decision and block read are two register stages. Lending between domains is under review.', fs=11.5, valign='top')
+text(BX + 26, ry - 4, 408, 40, 'Decision and block read are two register stages. A block received from another domain runs before own blocks; its PE reads the weights from that domain.', fs=11.5, valign='top')
 QX, QY, QS, QG = BX + 478, BY + 60, 112, 16
 for j in range(2):
     line([(QX - 14, QY + j * (QS + QG) + QS / 2.0), (QX + 2 * QS + QG + 14, QY + j * (QS + QG) + QS / 2.0)], color=C['xbar'], sw=3)
