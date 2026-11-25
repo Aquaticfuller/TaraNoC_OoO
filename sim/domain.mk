@@ -31,7 +31,9 @@ ENV     = PATH=$(PYBIN):$$PATH FLOO_DIR=$$(cd $(ROOT) && bender path floo_noc 2>
 # external dispatcher.
 VLOGAN  := -assert svaext +v2k -override_timescale=1ns/1ps +define+TSCHED_DOM_PER_SIDE=1 +define+EXT_DISPATCH=tsched_harness
 # Program of task instructions for the host model (a directory with prog.txt, from scripts/gen_program.py).
-PROG    ?= $(ROOT)/sim/prog/domain_smoke
+# sys/prog/gemm: one load, one task of four matrix blocks for the tensor engines, twelve placeholder blocks for
+# the vector units, then a block that checks the result.
+PROG    ?= $(ROOT)/sys/prog/gemm
 HWMAKE  = $(ENV) $(MAKE) -C $(TM)/hardware config=$(CONFIG) buildpath=$(BUILD) bender="bender -d $(ROOT)" \
           vlogan_args="$(VLOGAN)" vcs_args="+PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(PROG) -assert nopostproc $(ARGS)"
 
@@ -52,4 +54,4 @@ sw:
 # ends the run and prints the verdict.
 run: sw
 	-$(HWMAKE) simcvcs > $(BUILD)/run.log 2>&1
-	@grep -E '\[tsched\]' $(BUILD)/transcript; grep -q '\[tsched\] PASS' $(BUILD)/transcript
+	@grep -E '\[tsched\]|\[UART\]' $(BUILD)/transcript; grep -q '\[tsched\] PASS' $(BUILD)/transcript && ! grep -q 'check FAIL' $(BUILD)/transcript
