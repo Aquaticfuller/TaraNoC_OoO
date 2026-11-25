@@ -56,10 +56,15 @@ module tsched_backend import tsched_pkg::*; (
   riq_push_t   riq;
   logic        alloc_valid;
   phys_t       alloc;
+  logic        issue_valid, issue_any;
+  phys_t       issue_s1;
+  run_req_t    issue;
   logic  [1:0] unmap_valid;
   phys_t [1:0] unmap;
   logic        free_valid;
   phys_t       free;
+  logic  [1:0] unused_dec_valid;
+  dom_t  [1:0] unused_dec_dom;
   logic        slot_free_valid;
   dom_t        slot_free_dom;
   slot_t       slot_free;
@@ -146,6 +151,10 @@ module tsched_backend import tsched_pkg::*; (
     .ref_dec_p_i       (dn_s1),
     .place_i           (place),
     .done_i            (wake_done_q),
+    .use_valid_i       (issue_valid & issue.slot_v),
+    .use_i             (issue_s1),
+    .unused_dec_valid_o(unused_dec_valid),
+    .unused_dec_dom_o  (unused_dec_dom),
     .rd_i              (hf_rd),
     .rd_o              (hf_state),
     .rd_sat_o          (hf_sat),
@@ -163,9 +172,7 @@ module tsched_backend import tsched_pkg::*; (
   logic [NumDomains-1:0][CredW-1:0]   cred_d, cred_q;
   logic [NumDomains-1:0]              credit_ok;
 
-  logic     issue_valid, issue_any;
   dom_t     issue_dom;
-  run_req_t issue;
 
   logic run_done;          // a run finished in domain dn_src_q
   logic load_done;         // a load finished in domain dn_src_q
@@ -208,6 +215,8 @@ module tsched_backend import tsched_pkg::*; (
     .blk_out_i         (blk_out_q),
     .load_done_i       (load_done),
     .load_done_dom_i   (dom_t'(dn_src_q)),
+    .unused_dec_valid_i(unused_dec_valid),
+    .unused_dec_dom_i  (unused_dec_dom),
     .slot_free_valid_i (slot_free_valid),
     .slot_free_dom_i   (slot_free_dom),
     .slot_free_i       (slot_free),
@@ -250,7 +259,7 @@ module tsched_backend import tsched_pkg::*; (
     end else begin
       any_hold_q <= {any_hold_q[0], 1'b0};
       if (issue_valid && issue_any) begin
-        any_rot_q  <= issue_dom + dom_t'(1);
+        any_rot_q  <= issue_dom + dom_t'(PlaceStride);
         any_hold_q <= 2'b11;
       end
     end
@@ -275,6 +284,7 @@ module tsched_backend import tsched_pkg::*; (
     .issue_valid_o (issue_valid),
     .issue_any_o   (issue_any),
     .issue_dom_o   (issue_dom),
+    .issue_s1_o    (issue_s1),
     .issue_o       (issue)
   );
 

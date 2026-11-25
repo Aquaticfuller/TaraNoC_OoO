@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: SHL-0.51
 
 // Load queue and placement: renamed TLoad tasks leave in program order, each to the domain that has the
-// least work outstanding among the domains that can take a load now.
+// least work among the domains that can take a load now. Work is counted in two parts, compared in this
+// order: loads placed in the domain whose first task has not been issued yet (work that is still to
+// come, for example weights fetched ahead of a join), then blocks received and not finished.
 //
 // A domain can take a load when its DMA engines are idle and it has a free slot; the cluster as a whole
 // needs LanesPerLoad free stream lanes. These resources are counted here, so the links to the domains
@@ -25,6 +27,9 @@ module tsched_load_issue import tsched_pkg::*; (
   // a load finished in domain load_done_dom_i
   input  logic                                load_done_i,
   input  dom_t                                load_done_dom_i,
+  // placed data of a domain got its first task, or was released without one
+  input  logic  [1:0]                         unused_dec_valid_i,
+  input  dom_t  [1:0]                         unused_dec_dom_i,
   // a slot was released
   input  logic                                slot_free_valid_i,
   input  dom_t                                slot_free_dom_i,
@@ -36,7 +41,8 @@ module tsched_load_issue import tsched_pkg::*; (
 );
 
   localparam int unsigned LaneW = $clog2(LanesTotal + 1);
-  localparam int unsigned KeyW  = BlkCntW + DomW;
+  localparam int unsigned PendW = $clog2(SlotsPerDomain + 1);
+  localparam int unsigned KeyW  = PendW + BlkCntW + DomW;
 
   logic   q_valid, q_empty, q_full, q_pop;
   loadq_t q_head;
@@ -68,6 +74,7 @@ module tsched_load_issue import tsched_pkg::*; (
   logic [NumDomains-1:0]                      dma_busy_d, dma_busy_q;
   logic [NumDomains-1:0][SlotsPerDomain-1:0]  slot_free_d, slot_free_q;
   dom_t                                       rot_d, rot_q;
+  logic [NumDomains-1:0][PendW-1:0]           pend_d, pend_q;
 
   logic [NumDomains-1:0]           elig;
   logic [NumDomains-1:0][KeyW-1:0] key;
@@ -86,7 +93,7 @@ module tsched_load_issue import tsched_pkg::*; (
   for (genvar d = 0; d < NumDomains; d++) begin : gen_key
     assign elig[d] = ~dma_busy_q[d] & (|slot_free_q[d]);
     // Least outstanding work first; equal work goes to the domain after the one served last.
-    assign key[d]  = {blk_out_i[d], dom_t'(DomW'(d) - rot_q)};
+    assign key[d]  = {pend_q[d], blk_out_i[d], dom_t'(DomW'(d) - rot_q)};
   end
 
   tsched_argmin #(
@@ -123,9 +130,14 @@ module tsched_load_issue import tsched_pkg::*; (
     if (issue) begin
       dma_busy_d[best]        = 1'b1;
       slot_free_d[best][slot] = 1'b0;
-      rot_d                   = best + dom_t'(1);
+      rot_d                   = best + dom_t'(PlaceStride);
     end
     lanes_d = lanes_q + (load_done_i ? LaneW'(LanesPerLoad) : '0) - (issue ? LaneW'(LanesPerLoad) : '0);
+    for (int unsigned d = 0; d < NumDomains; d++) begin
+      pend_d[d] = pend_q[d] + PendW'(issue & (best == dom_t'(d)))
+                - PendW'(unused_dec_valid_i[0] & (unused_dec_dom_i[0] == dom_t'(d)))
+                - PendW'(unused_dec_valid_i[1] & (unused_dec_dom_i[1] == dom_t'(d)));
+    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -134,6 +146,7 @@ module tsched_load_issue import tsched_pkg::*; (
       dma_busy_q   <= '0;
       slot_free_q  <= '1;
       rot_q        <= '0;
+      pend_q       <= '0;
       load_valid_o <= '0;
       place_v_q    <= 1'b0;
     end else begin
@@ -141,6 +154,7 @@ module tsched_load_issue import tsched_pkg::*; (
       dma_busy_q   <= dma_busy_d;
       slot_free_q  <= slot_free_d;
       rot_q        <= rot_d;
+      pend_q       <= pend_d;
       load_valid_o <= '0;
       load_valid_o[best] <= issue;
       place_v_q    <= issue;

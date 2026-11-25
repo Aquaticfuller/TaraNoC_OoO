@@ -9,6 +9,8 @@
 //   done      the task that defines the handle has finished
 //   ref       tasks renamed with this handle as their data (s1) and not yet done
 //   unmapped  the mapping of the handle has ended: no later task can name it
+//   used      a task that computes on the data has been issued (placed handles only). Data that is
+//             placed and not yet used is work a domain will get later; the load placement counts it.
 //
 // Release
 //   A handle, and the slot it holds, is released when it is unmapped, done, and has no reference left.
@@ -40,6 +42,12 @@ module tsched_handle_file import tsched_pkg::*; #(
   // wake-up buses
   input  wake_place_t           place_i,
   input  wake_done_t            done_i,
+  // a task that computes on the data of use_i was issued
+  input  logic                  use_valid_i,
+  input  phys_t                 use_i,
+  // placed data stopped waiting for its first task: [0] it was used, [1] it was released unused
+  output logic  [1:0]           unused_dec_valid_o,
+  output dom_t  [1:0]           unused_dec_dom_o,
   // reads
   input  phys_t   [NumRead-1:0] rd_i,
   output hstate_t [NumRead-1:0] rd_o,
@@ -56,6 +64,7 @@ module tsched_handle_file import tsched_pkg::*; #(
   logic  [NumPhys-1:0]           unmapped_d, unmapped_q;
   logic  [NumPhys-1:0]           placed_d, placed_q;
   logic  [NumPhys-1:0]           done_d, done_q;
+  logic  [NumPhys-1:0]           used_d, used_q;
   logic  [NumPhys-1:0][RefW-1:0] ref_d, ref_q;
   dom_t  [NumPhys-1:0]           dom_q;
   slot_t [NumPhys-1:0]           slot_q;
@@ -90,6 +99,12 @@ module tsched_handle_file import tsched_pkg::*; #(
   assign slot_free_dom_o   = dom_q[gc_q];
   assign slot_free_o       = slot_q[gc_q];
 
+  // A handle with a task being issued holds a reference, so it is not the one being released.
+  assign unused_dec_valid_o[0] = use_valid_i & placed_q[use_i] & ~used_q[use_i];
+  assign unused_dec_dom_o[0]   = dom_q[use_i];
+  assign unused_dec_valid_o[1] = gc_v_q & placed_q[gc_q] & ~used_q[gc_q];
+  assign unused_dec_dom_o[1]   = dom_q[gc_q];
+
   // -------------------------------------------------------------------------------------------
   // State
   // -------------------------------------------------------------------------------------------
@@ -100,8 +115,11 @@ module tsched_handle_file import tsched_pkg::*; #(
     unmapped_d = unmapped_q;
     placed_d   = placed_q;
     done_d     = done_q;
+    used_d     = used_q;
     if (gc_v_q) live_d[gc_q] = 1'b0;
+    if (use_valid_i) used_d[use_i] = 1'b1;
     if (alloc_valid_i) begin
+      used_d[alloc_i]     = 1'b0;
       live_d[alloc_i]     = 1'b1;
       unmapped_d[alloc_i] = 1'b0;
       placed_d[alloc_i]   = 1'b0;
@@ -127,6 +145,7 @@ module tsched_handle_file import tsched_pkg::*; #(
       unmapped_q <= '0;
       placed_q   <= '0;
       done_q     <= '0;
+      used_q     <= '0;
       ref_q      <= '0;
       gc_v_q     <= 1'b0;
       gc_q       <= '0;
@@ -135,6 +154,7 @@ module tsched_handle_file import tsched_pkg::*; #(
       unmapped_q <= unmapped_d;
       placed_q   <= placed_d;
       done_q     <= done_d;
+      used_q     <= used_d;
       ref_q      <= ref_d;
       gc_v_q     <= gc_v_d;
       gc_q       <= gc_d;

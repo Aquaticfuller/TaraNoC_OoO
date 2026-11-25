@@ -23,6 +23,11 @@ package tsched_pkg;
 `ifdef TSCHED_DOM_PER_SIDE `TSCHED_DOM_PER_SIDE `else 4 `endif;
   localparam int unsigned NumDomains      = DomPerSide * DomPerSide;
   localparam int unsigned GroupsPerDomain = 4;
+  // Among equally loaded domains, placement moves on by this many domains after each choice: one to the
+  // right and one down on the domain mesh. Consecutive pieces of work then land in domains that are not
+  // direct neighbours, so the neighbours that can borrow from them do not overlap. The stride is coprime
+  // with the number of domains, so every domain is visited.
+  localparam int unsigned PlaceStride     = DomPerSide + 1;
   localparam int unsigned NumGroups       = NumDomains * GroupsPerDomain;
   // PEs of one group. Tensor engines take indices [0, NumTensor), vector units the rest.
   localparam int unsigned NumTensor =
@@ -47,7 +52,8 @@ package tsched_pkg;
   localparam int unsigned LanesPerLoad = GroupsPerDomain;
   // Each group DMA moves its share of a load in this many chunks (a power of two). The chunks that
   // every group of the domain has finished tell the domain how much of the slot can be computed on.
-  localparam int unsigned ChunksPerGroup = 8;
+  localparam int unsigned ChunksPerGroup =
+`ifdef TSCHED_CHUNKS_PER_GROUP `TSCHED_CHUNKS_PER_GROUP `else 8 `endif;
 
   // ---------------------------------------------------------------------------------------------
   // Cluster level
@@ -81,7 +87,7 @@ package tsched_pkg;
   localparam int unsigned WidW   = idx_w(WinDepth);
   localparam int unsigned TixW   = idx_w(DomTaskDepth);
   localparam int unsigned ChunkW = $clog2(ChunksPerGroup);
-  localparam int unsigned NblkW  =  8;   // blocks of one task
+  localparam int unsigned NblkW  = 10;   // blocks of one task
   localparam int unsigned KernW  =  8;   // kernel a PE runs
   localparam int unsigned ArgW   = 32;   // argument record of the kernel, opaque to the scheduler
   localparam int unsigned LenW   = 24;   // bytes of one load

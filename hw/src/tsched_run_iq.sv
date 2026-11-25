@@ -39,11 +39,11 @@ module tsched_run_iq import tsched_pkg::*; (
   output logic                  issue_valid_o,
   output logic                  issue_any_o,     // the task went to any_dom_i
   output dom_t                  issue_dom_o,
+  output phys_t                 issue_s1_o,      // data handle of the task, valid if issue_o.slot_v
   output run_req_t              issue_o
 );
 
   localparam int unsigned N    = RunIqDepth;
-  localparam int unsigned IdxW = idx_w(N);
 
   // What the scheduler needs of an entry.
   logic  [N-1:0] valid_d, valid_q;
@@ -65,24 +65,23 @@ module tsched_run_iq import tsched_pkg::*; (
   payload_t [N-1:0] payload_q;
 
   logic [N-1:0]    push_oh;
-  logic [IdxW-1:0] push_idx;
-  logic            full;
   logic [N-1:0]    req, gnt;
   logic            gnt_any;
 
-  lzc #(
-    .WIDTH (N),
-    .MODE  (1'b0)
-  ) i_lzc_free (
-    .in_i    (~valid_q),
-    .cnt_o   (push_idx),
-    .empty_o (full)
-  );
+  // The entry the next push fills is chosen ahead of time and held one-hot in a register, so the search
+  // for a free entry is not in the push path and every write below is enabled by one register bit. The
+  // reserved entry is not valid yet; the search skips it.
+  logic [N-1:0] nf_d, nf_q;
+  logic [N-1:0] free_cand, free_first;
 
-  assign ready_o = ~full;
+  assign free_cand  = ~valid_q & ~nf_q;
+  assign free_first = free_cand & (~free_cand + N'(1));
+  assign ready_o    = |nf_q;
+  assign push_oh    = nf_q & {N{push_i}};
+
   always_comb begin
-    push_oh = '0;
-    push_oh[push_idx] = push_i;
+    nf_d = nf_q;
+    if (push_i || !ready_o) nf_d = free_first;
   end
 
   // -------------------------------------------------------------------------------------------
@@ -144,17 +143,20 @@ module tsched_run_iq import tsched_pkg::*; (
 
   // The grant is one-hot, so the selected entry is an OR over the gated entries.
   payload_t sel_payload;
+  phys_t    sel_s1;
   dom_t     sel_dom;
   slot_t    sel_slot;
   logic     sel_placed, sel_follow;
   always_comb begin
     sel_payload = '0;
+    sel_s1      = '0;
     sel_dom     = '0;
     sel_slot    = '0;
     sel_placed  = 1'b0;
     sel_follow  = 1'b0;
     for (int unsigned i = 0; i < N; i++) begin
       sel_payload |= {$bits(payload_t){gnt[i]}} & payload_q[i];
+      sel_s1      |= {PhysW{gnt[i]}} & s1_q[i];
       sel_dom     |= {DomW{gnt[i]}}  & dom_q[i];
       sel_slot    |= {SlotW{gnt[i]}} & slot_q[i];
       sel_placed  |= gnt[i] & s1_placed_q[i];
@@ -170,12 +172,14 @@ module tsched_run_iq import tsched_pkg::*; (
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       valid_q       <= '0;
+      nf_q          <= '0;
       s1_placed_q   <= '0;
       s1_done_q     <= '0;
       s2_done_q     <= '0;
       issue_valid_o <= 1'b0;
     end else begin
       valid_q       <= valid_d;
+      nf_q          <= nf_d;
       s1_placed_q   <= s1_placed_d;
       s1_done_q     <= s1_done_d;
       s2_done_q     <= s2_done_d;
@@ -186,18 +190,21 @@ module tsched_run_iq import tsched_pkg::*; (
   always_ff @(posedge clk_i) begin
     dom_q  <= dom_d;
     slot_q <= slot_d;
-    if (push_i) begin
-      s1_v_q[push_idx]      <= push_data_i.s1_v;
-      s1_follow_q[push_idx] <= push_data_i.follow;
-      s1_q[push_idx]        <= push_data_i.s1;
-      s2_v_q[push_idx]      <= push_data_i.s2_v;
-      s2_q[push_idx]        <= push_data_i.s2;
-      payload_q[push_idx]   <= '{wid: push_data_i.wid, cls: push_data_i.cls, nblk: push_data_i.nblk,
-                                 kern: push_data_i.kern, arg: push_data_i.arg};
+    for (int unsigned i = 0; i < N; i++) begin
+      if (push_oh[i]) begin
+        s1_v_q[i]      <= push_data_i.s1_v;
+        s1_follow_q[i] <= push_data_i.follow;
+        s1_q[i]        <= push_data_i.s1;
+        s2_v_q[i]      <= push_data_i.s2_v;
+        s2_q[i]        <= push_data_i.s2;
+        payload_q[i]   <= '{wid: push_data_i.wid, cls: push_data_i.cls, nblk: push_data_i.nblk,
+                            kern: push_data_i.kern, arg: push_data_i.arg};
+      end
     end
     if (gnt_any) begin
       issue_any_o <= ~sel_placed;
       issue_dom_o <= sel_placed ? sel_dom : any_dom_i;
+      issue_s1_o  <= sel_s1;
       issue_o     <= '{wid: sel_payload.wid, cls: sel_payload.cls, nblk: sel_payload.nblk,
                        slot_v: sel_placed, follow: sel_placed & sel_follow, slot: sel_slot,
                        kern: sel_payload.kern, arg: sel_payload.arg};
@@ -208,7 +215,7 @@ module tsched_run_iq import tsched_pkg::*; (
   // pragma translate_off
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
-      assert (!(push_i && full)) else $error("[tsched_run_iq] push into a full queue");
+      assert (!(push_i && !ready_o)) else $error("[tsched_run_iq] push into a full queue");
       assert ($onehot0(gnt)) else $error("[tsched_run_iq] more than one grant");
     end
   end

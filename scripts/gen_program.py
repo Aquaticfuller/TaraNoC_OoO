@@ -44,7 +44,8 @@ from sysmodel.mesh import Mesh, slow_factor                      # noqa: E402
 
 LOAD, RUN, JOIN, FREE = 0, 1, 2, 3
 CLS_T, CLS_V, CLS_ANY = 1, 2, 3
-CHUNK = 32          # GroupsPerDomain * ChunksPerGroup: a load is a multiple of this
+CHUNK = 128         # a load is a multiple of GroupsPerDomain * ChunksPerGroup; this covers up to 32 chunks
+NBLK_MAX = 1023     # blocks of one task (NblkW in tsched_pkg)
 
 
 class Program:
@@ -59,7 +60,7 @@ class Program:
 
     def run(self, cls, nblk, dur_t, dur_v, hs1=None, follow=False, kill=False, hs2=None, hd=None, need=0, dep=-1):
         t = len(self.tasks)
-        assert 1 <= nblk <= 255
+        assert 1 <= nblk <= NBLK_MAX
         self.tasks.append((t, cls, nblk, int(bool(follow and hs1 is not None)), need, dep, dur_t, dur_v))
         self.instr.append((RUN, int(hd is not None), hd or 0, int(hs1 is not None), hs1 or 0, int(follow), int(kill),
                            int(hs2 is not None), hs2 or 0, cls, nblk, 0, t, 0, 0))
@@ -193,7 +194,7 @@ def gen_moe(a):
             c = sim.vec if small else sim.main
             T = pf / sim.rate[c] * sim.slow_in(c, n)
             kmax = sim.n_eng[c] if kind == 'x' else max(1, int(sim.n_eng[c] * sc.blocks_per_engine / k))
-            nb = min(255, max(1, min(kmax, int(math.ceil(T / sc.min_block_cycles)))))
+            nb = min(NBLK_MAX, max(1, min(kmax, int(math.ceil(T / sc.min_block_cycles)))))
             dur = [[max(1, int(math.ceil(pf / nb / sim.rate[ci] * slow_factor(sim.cls[ci], system, n, h)))) for h in hops] for ci in (ct, cv)]
             p.load(1, nbytes / k)
             p.run(CLS_ANY if small else CLS_T, nb, dur[0], dur[1], hs1=1, follow=True, kill=True, hs2=hs2, need=need)
@@ -220,13 +221,30 @@ def gen_moe(a):
         prev = 4
     p.write(a.out, mesh, hops)
 
-    r = simulate2(system, model, sc, layers)
-    json.dump(dict(cycles=r.cycles, per_layer=r.per_layer, pieces=r.pieces_per_layer, blocks=r.blocks_per_layer,
+    class Probe(MeshSim):
+        """The model run, with the cycle at which each phase of a layer ends."""
+        phases = []
+
+        def on_block_done(self, c, g, b):
+            super().on_block_done(c, g, b)
+            ph = self.__dict__.setdefault('ph', {})
+            if ph.get('layer') != self.li:
+                ph.clear()
+                ph['layer'] = self.li
+            if 'experts' not in ph and self.xdone == len(self.experts):
+                ph['experts'] = self.t
+                Probe.phases.append(('experts', self.li, round(self.t)))
+            if 'mixer_in' not in ph and self.out_started:
+                ph['mixer_in'] = self.t
+                Probe.phases.append(('mixer_in', self.li, round(self.t)))
+
+    r = Probe(system, model, sc).run(layers)
+    json.dump(dict(cycles=r.cycles, phases=Probe.phases, per_layer=r.per_layer, pieces=r.pieces_per_layer, blocks=r.blocks_per_layer,
                    stream_util=r.stream_util, busy=r.busy, work_share=r.work_share, mean_hops=r.mean_hops,
                    block_delay=r.block_delay, stream_delay=r.stream_delay, window=r.window,
                    args=vars(a), lane_bpc100=int(round(system.l2_port_bytes_per_cycle * system.l2_efficiency * 100))),
               open(os.path.join(a.out, 'model.json'), 'w'), indent=1)
-    print('moe: %d layers, %d instructions, %d run tasks; model %.0f cycles' % (len(layers), len(p.instr), len(p.tasks), r.cycles))
+    print('moe: %d layers, %d instructions, %d run tasks; model %.0f cycles, phases %s' % (len(layers), len(p.instr), len(p.tasks), r.cycles, Probe.phases))
 
 
 if __name__ == '__main__':

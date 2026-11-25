@@ -259,13 +259,21 @@ module tsched_domain import tsched_pkg::*; #(
   logic [2*NumCls-1:0][T-1:0] sel_req, sel_gnt;
   logic [NumCls-1:0]          has_own, has_lend;
 
+  // A PE class first takes the tasks that only it can run, then the tasks it shares with the other
+  // class; within each, the oldest. This keeps tensor engines off blocks that vector units can do
+  // while work is waiting that needs a tensor engine.
   for (genvar c = 0; c < NumCls; c++) begin : gen_cand
+    logic [T-1:0] own_excl, own_any, lend_excl, lend_any;
     for (genvar t = 0; t < T; t++) begin : gen_t
-      assign sel_req[c][t]        = avail[t] & t_cls_q[t][c];
-      assign sel_req[NumCls+c][t] = avail[t] & t_cls_q[t][c] & spare[t];
+      assign own_any[t]   = avail[t] & t_cls_q[t][c];
+      assign own_excl[t]  = own_any[t] & (t_cls_q[t] == (cls_t'(1) << c));
+      assign lend_any[t]  = own_any[t] & spare[t];
+      assign lend_excl[t] = own_excl[t] & spare[t];
     end
-    assign has_own[c]  = |sel_req[c];
-    assign has_lend[c] = |sel_req[NumCls+c];
+    assign sel_req[c]        = (|own_excl)  ? own_excl  : own_any;
+    assign sel_req[NumCls+c] = (|lend_excl) ? lend_excl : lend_any;
+    assign has_own[c]        = |own_any;
+    assign has_lend[c]       = |lend_any;
   end
 
   tsched_age_sel #(

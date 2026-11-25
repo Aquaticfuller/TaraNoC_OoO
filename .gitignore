@@ -25,3 +25,4 @@ csrc/
 simv*
 ucli.key
 transcript
+syn/build/

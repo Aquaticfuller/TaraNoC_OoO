@@ -153,7 +153,7 @@ module tb_tsched;
   longint unsigned last_event;
   int unsigned     errors;
 
-  bit [255:0]  t_started [];          // blocks of a task that have started
+  bit [(1<<NblkW)-1:0] t_started [];  // blocks of a task that have started
   int unsigned t_ndone [];            // blocks of a task that are done
   bit          t_done [];
   int unsigned done_prefix;           // tasks 0 .. done_prefix-1 are done
@@ -315,7 +315,12 @@ module tb_tsched;
             t_done[t] = 1'b1;
             tasks_done++;
             if (t_slot_dom[t] >= 0) slot_users[t_slot_dom[t]][t_slot[t]]--;
-            while (done_prefix < n_tasks && t_done[done_prefix]) done_prefix++;
+            while (done_prefix < n_tasks && t_done[done_prefix]) begin
+              done_prefix++;
+              // The next task waits for everything before it: a phase of the program ends here.
+              if (done_prefix == n_tasks || t_need[done_prefix] == done_prefix)
+                $display("[tb] PHASE tasks_done=%0d cycle=%0d", done_prefix, cycle);
+            end
           end
         end
       end
