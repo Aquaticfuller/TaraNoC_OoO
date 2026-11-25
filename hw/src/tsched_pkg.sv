@@ -205,8 +205,10 @@ package tsched_pkg;
   // block travels through the cluster level; there are no links between domains.
   localparam int unsigned BalReach =
 `ifdef TSCHED_BAL_REACH `TSCHED_BAL_REACH `else 2 `endif;
-  // Blocks of other domains that a domain can hold before a next-block register takes them.
-  localparam int unsigned BorDepth = 4;
+  // Blocks of other domains that a domain can hold before a next-block register takes them. Two entries:
+  // with four, one of three workloads was 2.4% faster, for about 2,000 more gates per domain scheduler.
+  localparam int unsigned BorDepth =
+`ifdef TSCHED_BOR_DEPTH `TSCHED_BOR_DEPTH `else 2 `endif;
   localparam int unsigned WantW    = $clog2(GroupsPerDomain + 1);
 
   typedef struct packed {
