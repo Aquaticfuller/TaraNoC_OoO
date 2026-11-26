@@ -167,7 +167,7 @@ for i, (a, b) in enumerate(iq):
     flow([(x + 46, 626), (x + 46, 668)], sw=4)
     flow([(x + 46, 714), (x + 46, 756)], sw=4)
 SMALL = '<br><font style="font-size:11px">%s</font>'
-new(750, 668, 245, 50, '<b>Run Issue Queue</b> · 32 entry' + SMALL % 'ready: data placed · order handle done · credit<br>oldest ready task first, one per cycle')
+new(750, 668, 245, 50, '<b>Run Issue Queue</b> · 32 entry' + SMALL % 'ready: data placed · order done or chained<br>oldest ready task first, one per cycle')
 flow([(872, 626), (872, 668)], sw=4, color=C['new_dk'])
 cpu(40, 756, 492, 46, 'Integer Register File · 96 entry')
 cpu(540, 756, 192, 46, 'FP / Vector Register File · 64 entry')
@@ -179,7 +179,7 @@ for i, col in enumerate(fus):
     flow([(x + 46, 802), (x + 46, 844)], sw=4)
     for j, s in enumerate(col):
         fu(x, 844 + j * 32, 92, 28, s)
-new(750, 846, 245, 58, '<b>Resource Counters</b>' + SMALL % 'per domain: 4 task credits, free slots,<br>DMA busy · cluster: 32 lanes, 4 per load')
+new(750, 846, 245, 58, '<b>Resource Counters</b>' + SMALL % 'per domain: 4 task entries, free slots,<br>DMA busy · cluster: 32 lanes, 4 per load')
 new(750, 912, 245, 38, '<b>Completion Arbiter</b>' + SMALL % '16 domains and TJoin · one per cycle')
 box(750, 958, 245, 32, '<b>16 task ports</b> · one per domain', fill=C['new_dk'], fc='#FFFFFF', sw=1.0)
 new(556, 950, 184, 94, '<b>Balancer</b>' + SMALL % 'moves single blocks from a domain with waiting blocks to a domain with idle PEs, at most 2 steps apart; one move per cycle')
@@ -190,9 +190,9 @@ text(40, 962, 500, 26, 'Load Store Unit', bold=True, align='center')
 cpu(52, 994, 236, 46, 'Load Queue · 16 entry')
 cpu(296, 994, 232, 46, 'Store Queue · 12 entry')
 box(560, 1054, 435, 106, fill=C['new_bg'], stroke=C['new_dk'], sw=1.6, arc=6, tag='task-isa')
-text(572, 1056, 420, 22, 'Task instructions · decoded form, 140 bits; the encoding is open', bold=True, fs=12.5)
+text(572, 1056, 420, 22, 'Task instructions · decoded form, 141 bits; the encoding is open', bold=True, fs=12.5)
 text(572, 1078, 420, 20, '<b>TLoad</b> hd, len, addr · copy a tile from L2 into a free L1 slot', fs=12)
-text(572, 1097, 420, 20, '<b>TRun</b> hd, hs1, hs2, cls, vslow, nblk, kern · blocks on data hs1, after hs2', fs=12)
+text(572, 1097, 420, 20, '<b>TRun</b> hd, hs1, hs2, chain, cls, vslow, nblk, kern · on hs1, after hs2', fs=12)
 text(572, 1116, 420, 20, '<b>TJoin</b> hd · done when every older task is done', fs=12)
 text(572, 1135, 420, 20, '<b>TFree</b> hs1 · release the data and its slot', fs=12)
 flow([(386, 872), (386, 960)], sw=4)
@@ -248,7 +248,7 @@ box(BX + 14, BY + 44, 432, 442, fill=C['new_bg'], stroke=C['new_dk'], sw=1.8, ar
 text(BX + 14, BY + 46, 432, 28, 'Domain Scheduler', bold=True, fs=15, align='center')
 rows = [(36, '<b>Task table</b> · 4 tasks · kernel, blocks, PE types, speed hint, slot'),
         (46, '<b>Load unit</b> · one tile · 4 DMA engines, 4 chunks in flight each' + SMALL % '8 chunks, each whole rows across the 4 groups · progress = chunks all 4 finished'),
-        (46, '<b>Block counters</b> per task · handed out, eligible, running' + SMALL % 'a task that follows a stream gets blocks as its tile arrives'),
+        (46, '<b>Block counters</b> per task · handed out, eligible, running' + SMALL % 'eligible as its tile arrives (follow), or one per finished block of the task before (chain)'),
         (60, '<b>Block decision</b> · one block per cycle · oldest task first' + SMALL % ('1. give &nbsp;2. received block &nbsp;3. idle PE &nbsp;4. next block if no neighbour wants'
                                                                                         '<br>speed hint: vector units get the task only while tensor engines have a long backlog')),
         (36, '<b>Block read</b> · second stage: the fields of the block'),
@@ -330,7 +330,7 @@ stages = [('Decode', 'cpu', 'recognised, then through the reorder buffer like an
           ('Window', 'new', 'entry in program order; a TJoin completes at the head', '256 entry'),
           ('Issue', 'new', 'load: the domain with the least work; run: the domain of its data', '1 load + 1 run'),
           ('Hand-over', 'new', 'registered link to the domain scheduler; credits, no ready wire', '2 stages'),
-          ('Cut', 'dom', 'task → blocks by counters; follows the tile as it arrives', '≤ 1,023 blocks'),
+          ('Cut', 'dom', 'task → blocks by counters; follows a tile or the task before', '≤ 1,023 blocks'),
           ('Dispatch', 'dom', 'one block per cycle to a group; an idle PE starts in the next cycle', '2 stages'),
           ('Run', 'pe', 'a PE is a core: woken by the dispatch register of its tile, it reads the block, runs the kernel, writes done', '<i>10³–10⁵ cycles</i>'),
           ('Done', 'new', 'one completion per cycle; the slot is freed at its last user', '')]
@@ -371,7 +371,7 @@ text(1316, 1280, 330, 40, 'weights arrive; blocks become eligible as the tile fi
 text(1104, 1390, 880, 36, 'Per layer step, FP16: one decode token streams 116 MiB and uses each weight for 1.1 multiply-adds; a 64-token midfill 770 MiB and 10; '
      'a 2,048-token prefill 1,474 MiB and 174. With few tokens the PEs wait for the lanes.', fs=12.5, italic=True, valign='top')
 text(1104, 1428, 880, 36, '<b>Measured, four domains of real tiles:</b> a 16 KiB tile reaches its L1 slot in 105 cycles; 32 matrix blocks on it: 16 run at home, '
-     '16 move to the three other domains and read the tile there; all done 1,006 cycles after the first start. Vector units run blocks too; a speed hint keeps the last blocks for the tensor engines.', fs=12.5, valign='top')
+     '16 move to the three other domains and read the tile there; all done 1,006 cycles after the first start. Vector units run blocks too; a speed hint keeps the last blocks for the tensor engines. Chained kernels (projection, softmax, projection) overlap block by block: 37% shorter on one domain, 22% on four.', fs=12.5, valign='top')
 
 xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<mxfile host="app.diagrams.net">\n  <diagram name="TeraNoC-OoO architecture" id="teranoc-ooo-arch">\n'
        '    <mxGraphModel grid="1" page="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="%d" pageHeight="%d" '
