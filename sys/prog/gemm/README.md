@@ -18,3 +18,6 @@ has left its boot code; then: load a tile of 16,384 bytes (the matrix X, 128 x 6
 into an L1 slot; a task of 8 matrix blocks on the tensor engines that follows the load (block b needs rows
 16b .. 16b+15 of X, which is chunk b of the load); a task of 12 placeholder blocks on the vector units; a join;
 16 blocks on tensor-engine cores that check the result; a join; one block that reports; a join.
+
+Made with `scripts/gemm_prog.py gemm --blocks 8 --rows 16 --warm 16 --spare 12`. The matrix task names its rows per block in its argument, the check
+the number of elements; the PE program's matrix has 512 rows and a task may cover a part of them.
