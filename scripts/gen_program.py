@@ -14,22 +14,29 @@ Two kinds of program
 Files written to the output directory
   prog.txt   one task instruction per line:
              op hd_v hd hs1_v hs1 follow kill hs2_v hs2 cls nblk kern arg len addr
-             op: 0 TLoad, 1 TRun, 2 TJoin, 3 TFree; cls: bit 0 tensor engines, bit 1 vector units,
+             op: 0 TLoad, 1 TRun, 2 TJoin, 3 TFree; follow: bit 0 follow the stream of hs1, bit 1 chain (follow
+             the task of hs2 block by block); cls: bit 0 tensor engines, bit 1 vector units,
              bits 3:2 the speed hint vslow of a task for both (a block takes 2^vslow times as long on a vector unit);
              arg of a TRun is its task index
   tasks.txt  first line: number of run tasks; then per task
              index cls nblk follow need dep  T[0..H-1] V[0..H-1]
              need: tasks 0..need-1 must be done before the task starts; dep: one task that must be done, or -1
+             follow: bit 0 the task follows its stream, bit 1 it is chained to task dep (its k-th block starts
+             after k blocks of dep are done)
              T, V: cycles of one block on a tensor engine / vector unit at each of the H distances
   hop.txt    first line: groups domains H; then per group, the distance index to each domain
   model.json (moe) what the system model predicts for the same layers
 
   hint    one or several equal matrix tasks, each on its own load (so each in its own domain), with block times
           as measured on the cluster hardware: for the rule that shares a task between the two PE types
+  chain   chains of three kernels over a matrix (tensor engines, vector units, tensor engines), cut into several
+          chains of tasks or not, with block times as measured on the cluster hardware
 
 usage
   gen_program.py random <out_dir> [--side 4] [--seed 1] [--pieces 200] [--slots 4]
   gen_program.py hint <out_dir> [--side 2] [--blocks 128] [--tasks 1] [--cls 3] [--hint 2] [--tdur 860] [--vdur 3500]
+  gen_program.py chain <out_dir> [--side 2] [--blocks 128] [--tasks 1] [--cut 1] [--order chain] [--home 0]
+                 [--follow 0] [--tdur 845] [--sdur 2760]
   gen_program.py moe <out_dir> --kind midfill --n 64 [--regime x1] [--layers 1] [--block 500] [--vec 8]
                  [--seed 11] [--trace <dir>] [--synthetic] [--vslow]
 """
@@ -63,11 +70,14 @@ class Program:
         self.instr.append((LOAD, 1, hd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, nbytes, self.addr))
         self.addr += nbytes
 
-    def run(self, cls, nblk, dur_t, dur_v, hs1=None, follow=False, kill=False, hs2=None, hd=None, need=0, dep=-1, vslow=0):
+    def run(self, cls, nblk, dur_t, dur_v, hs1=None, follow=False, kill=False, hs2=None, hd=None, need=0, dep=-1, vslow=0,
+            chain=False):
         t = len(self.tasks)
         assert 1 <= nblk <= NBLK_MAX and 0 <= vslow <= 3 and (vslow == 0 or cls == CLS_ANY)
-        self.tasks.append((t, cls, nblk, int(bool(follow and hs1 is not None)), need, dep, dur_t, dur_v))
-        self.instr.append((RUN, int(hd is not None), hd or 0, int(hs1 is not None), hs1 or 0, int(follow), int(kill),
+        chain = bool(chain and hs2 is not None)
+        assert not chain or (dep >= 0 and self.tasks[dep][2] == nblk), 'a chained task has as many blocks as the task it follows'
+        self.tasks.append((t, cls, nblk, int(bool(follow and hs1 is not None and not chain)) | (2 if chain else 0), need, dep, dur_t, dur_v))
+        self.instr.append((RUN, int(hd is not None), hd or 0, int(hs1 is not None), hs1 or 0, int(follow) | (2 if chain else 0), int(kill),
                            int(hs2 is not None), hs2 or 0, cls | (vslow << 2), nblk, 0, t, 0, 0))
         return t
 
@@ -135,12 +145,17 @@ def gen_random(a):
             elif producer and c < 0.6:
                 h2 = rng.choice(list(producer))
                 kw.update(hs2=h2, dep=producer[h2])
+            nblk = rng.choice((1, 1, 2, 3, 5, 8, 13, 40, 90))
+            if 'dep' in kw and rng.random() < 0.6:
+                # Chained to the task of hs2: as many blocks as that task.
+                kw['chain'] = True
+                nblk = p.tasks[kw['dep']][2]
             hd = None
-            if rng.random() < 0.3:
+            if rng.random() < (0.6 if kw.get('chain') else 0.3):
                 hd = rng.randrange(16, 24)
                 joins.pop(hd, None)
             c = rng.choice((CLS_T, CLS_V, CLS_ANY, CLS_ANY))
-            t = p.run(c, rng.choice((1, 1, 2, 3, 5, 8, 13, 40, 90)), dur(), dur(), hd=hd,
+            t = p.run(c, nblk, dur(), dur(), hd=hd,
                       vslow=rng.choice((0, 1, 1, 2, 3)) if c == CLS_ANY else 0, **kw)
             if hd is not None:
                 producer[hd] = t
@@ -165,15 +180,51 @@ def gen_hint(a):
     mesh = Mesh(2 * a.side, 4)
     hops = hop_values(mesh)
     p = Program()
-    # A block that runs in another domain was about 5% slower on the hardware.
-    dt = [a.tdur if h == 0 else int(a.tdur * 1.05) for h in hops]
-    dv = [a.vdur if h == 0 else int(a.vdur * 1.05) for h in hops]
+    # A block that runs in another domain was about 5% slower on the hardware. hops[0] is the distance inside the
+    # domain of the data.
+    dt = [a.tdur if h == hops[0] else int(a.tdur * 1.05) for h in hops]
+    dv = [a.vdur if h == hops[0] else int(a.vdur * 1.05) for h in hops]
     for i in range(a.tasks):
         p.load(1 + i, a.blocks * 512)
         p.run(a.cls, a.blocks, dt, dv, hs1=1 + i, follow=True, kill=True, vslow=a.hint if a.cls == CLS_ANY else 0)
     p.join(31)
     p.write(a.out, mesh, hops)
     print('hint: %d tasks of %d blocks, cls %d, hint %d' % (a.tasks, a.blocks, a.cls, a.hint))
+
+
+# --------------------------------------------------------------------------------------------- chain
+def gen_chain(a):
+    """Chains of three kernels over one matrix each: tensor engines, vector units, tensor engines.
+
+    Block b of a stage needs block b of the stage before. A task can only wait for a whole task, so a chain of
+    --blocks blocks is cut into --cut chains of blocks/cut blocks (see scripts/chain_prog.py, which writes the
+    same program for the cluster hardware). With --follow 1 the stages are chained instead (the chain flag): the
+    scheduler releases the k-th block of a stage when k blocks of the stage before are done.
+    """
+    mesh = Mesh(2 * a.side, 4)
+    hops = hop_values(mesh)
+    p = Program()
+    far = lambda d: [d if h == hops[0] else int(d * 1.05) for h in hops]
+    dt, ds = far(a.tdur), far(a.sdur)
+    per = a.blocks // a.cut
+    assert a.blocks % a.cut == 0
+    for i in range(a.tasks):
+        h = 1 + i
+        p.load(h, a.blocks * 512)
+        prev = [None] * a.cut
+        order = [(c, s) for c in range(a.cut) for s in range(3)] if a.order == 'chain' else \
+                [(c, s) for s in range(3) for c in range(a.cut)]
+        if a.order == 'stage':
+            assert 3 * a.cut * a.tasks <= 20, 'not enough handle registers for this cut in stage order'
+        for c, s in order:
+            hd = (20 + s) if a.order == 'chain' else (10 + 3 * (i * a.cut + c) + s)
+            data = h if (s == 0 or a.home) else None
+            prev[c] = p.run(CLS_V if s == 1 else CLS_T, per, dt, ds, hs1=data, hd=hd,
+                            hs2=None if s == 0 else hd - 1, dep=-1 if s == 0 else prev[c], chain=bool(a.follow))
+        p.free(h)
+    p.join(31)
+    p.write(a.out, mesh, hops)
+    print('chain: %d matrices, %d blocks each, cut into %d chains, %s order' % (a.tasks, a.blocks, a.cut, a.order))
 
 
 # --------------------------------------------------------------------------------------------- moe
@@ -274,7 +325,7 @@ def gen_moe(a):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('mode', choices=('random', 'moe', 'hint'))
+    ap.add_argument('mode', choices=('random', 'moe', 'hint', 'chain'))
     ap.add_argument('out')
     ap.add_argument('--side', type=int, default=4, help='domains per side (random)')
     ap.add_argument('--seed', type=int, default=11)
@@ -298,5 +349,10 @@ if __name__ == '__main__':
     ap.add_argument('--hint', type=int, default=2, help='hint: speed hint of the tasks (cls 3)')
     ap.add_argument('--tdur', type=int, default=860, help='hint: cycles of a block on a tensor engine')
     ap.add_argument('--vdur', type=int, default=3500, help='hint: cycles of a block on a vector unit')
+    ap.add_argument('--sdur', type=int, default=2760, help='chain: cycles of a block of the vector stage')
+    ap.add_argument('--cut', type=int, default=1, help='chain: chains of tasks the matrix is cut into')
+    ap.add_argument('--order', default='chain', choices=('chain', 'stage'), help='chain: program order of the tasks')
+    ap.add_argument('--home', type=int, default=0, help='chain: 1 issues every stage to the domain of the load')
+    ap.add_argument('--follow', type=int, default=0, help='chain: 1 sets the chain flag of stages 2 and 3')
     a = ap.parse_args()
-    {'random': gen_random, 'moe': gen_moe, 'hint': gen_hint}[a.mode](a)
+    {'random': gen_random, 'moe': gen_moe, 'hint': gen_hint, 'chain': gen_chain}[a.mode](a)
