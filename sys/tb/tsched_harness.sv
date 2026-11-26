@@ -39,7 +39,7 @@ module tsched_harness import tsched_pkg::*; #(
   // Bytes of one group in a row of L1, and bytes of one L1 slot (the PE program reserves the same).
   localparam int unsigned GroupBytes = mempool_pkg::NumBanksPerGroup * 4;
   localparam int unsigned SlotBytes  =
-`ifdef TSCHED_SLOT_BYTES `TSCHED_SLOT_BYTES `else 16384 `endif;
+`ifdef TSCHED_SLOT_BYTES `TSCHED_SLOT_BYTES `else 65536 `endif;
 
   localparam int unsigned LinkStages = 2;
 
@@ -146,6 +146,7 @@ module tsched_harness import tsched_pkg::*; #(
                    hs2_v, hs2, cls, nblk, kern, arg, len, addr) == 15) begin
       i = '{op: top_e'(op[1:0]), hd_v: hd_v[0], hd: hd[ArchW-1:0], hs1_v: hs1_v[0], hs1: hs1[ArchW-1:0],
             follow: follow[0], kill: kill[0], hs2_v: hs2_v[0], hs2: hs2[ArchW-1:0], cls: cls[NumCls-1:0],
+            vslow: cls[NumCls+VslowW-1:NumCls],   // the file keeps the speed hint above the classes
             nblk: nblk[NblkW-1:0], kern: kern[KernW-1:0], arg: arg[ArgW-1:0], len: len[LenW-1:0],
             addr: addr[AddrW-1:0]};
       prog.push_back(i);

@@ -39,6 +39,18 @@ package tsched_pkg;
   localparam int unsigned NumCls = 2;
   localparam int unsigned ClsT   = 0;
   localparam int unsigned ClsV   = 1;
+  // Tensor engines of one domain.
+  localparam int unsigned DomTensor = GroupsPerDomain * NumTensor;
+  // Speed hint of a task that both PE classes may run: a block takes about 2^vslow times as long on a vector
+  // unit as on a tensor engine. 0: no statement, a block goes to whichever PE is idle. Otherwise the vector
+  // units get blocks of the task only while the tensor engines of the domain would need longer for the blocks
+  // that wait than one such vector block takes (tsched_domain).
+  localparam int unsigned VslowW = 2;
+  // With a hint, the vector units also wait while a domain within reach has tensor engines without work
+  // (tsched_balance, wanted, and a short time after a block has come back from another domain): a block given
+  // to such an engine ends sooner. 0 only to measure what this brings.
+  localparam bit          VecHoldNear =
+`ifdef TSCHED_VEC_HOLD_NEAR `TSCHED_VEC_HOLD_NEAR `else 1'b1 `endif;
 
   // ---------------------------------------------------------------------------------------------
   // Memory resources
@@ -113,6 +125,7 @@ package tsched_pkg;
   typedef logic [LenW-1:0]   len_t;
   typedef logic [AddrW-1:0]  addr_t;
   typedef logic [NumCls-1:0] cls_t;
+  typedef logic [VslowW-1:0] vslow_t;
 
   // ---------------------------------------------------------------------------------------------
   // Task instructions (host to cluster level), in program order and no longer speculative
@@ -135,6 +148,7 @@ package tsched_pkg;
     logic  hs2_v;    // TRun: handle that must be done before the task starts
     arch_t hs2;
     cls_t  cls;      // TRun: PE classes that may run the blocks
+    vslow_t vslow;   // TRun, both classes: log2 of how much longer a block takes on a vector unit; 0: no hint
     nblk_t nblk;     // TRun: number of blocks, at least 1
     kern_t kern;
     arg_t  arg;
@@ -148,6 +162,7 @@ package tsched_pkg;
   typedef struct packed {
     wid_t  wid;
     cls_t  cls;
+    vslow_t vslow;
     nblk_t nblk;
     logic  slot_v;   // the task has data in a slot of this domain
     logic  follow;   // blocks become eligible as that slot fills
@@ -280,6 +295,7 @@ package tsched_pkg;
     logic  s2_v;
     phys_t s2;
     cls_t  cls;
+    vslow_t vslow;
     nblk_t nblk;
     kern_t kern;
     arg_t  arg;

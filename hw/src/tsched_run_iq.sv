@@ -67,6 +67,7 @@ module tsched_run_iq import tsched_pkg::*; (
   typedef struct packed {
     wid_t  wid;
     cls_t  cls;
+    vslow_t vslow;
     nblk_t nblk;
     kern_t kern;
     arg_t  arg;
@@ -226,7 +227,7 @@ module tsched_run_iq import tsched_pkg::*; (
         s1_q[i]        <= push_data_i.s1;
         s2_v_q[i]      <= push_data_i.s2_v;
         s2_q[i]        <= push_data_i.s2;
-        payload_q[i]   <= '{wid: push_data_i.wid, cls: push_data_i.cls, nblk: push_data_i.nblk,
+        payload_q[i]   <= '{wid: push_data_i.wid, cls: push_data_i.cls, vslow: push_data_i.vslow, nblk: push_data_i.nblk,
                             kern: push_data_i.kern, arg: push_data_i.arg};
       end
     end
@@ -237,7 +238,7 @@ module tsched_run_iq import tsched_pkg::*; (
     if (grant_valid_o) begin
       issue_dom_o <= grant_dom_o;
       issue_s1_o  <= rd_s1;
-      issue_o     <= '{wid: rd_payload.wid, cls: rd_payload.cls, nblk: rd_payload.nblk,
+      issue_o     <= '{wid: rd_payload.wid, cls: rd_payload.cls, vslow: rd_payload.vslow, nblk: rd_payload.nblk,
                        slot_v: rd_placed, follow: rd_placed & rd_follow, slot: rd_slot,
                        kern: rd_payload.kern, arg: rd_payload.arg};
     end

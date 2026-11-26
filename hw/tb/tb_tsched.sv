@@ -138,6 +138,7 @@ module tb_tsched;
                    hs2_v, hs2, cls, nblk, kern, arg, len, addr) == 15) begin
       i = '{op: top_e'(op[1:0]), hd_v: hd_v[0], hd: hd[ArchW-1:0], hs1_v: hs1_v[0], hs1: hs1[ArchW-1:0],
             follow: follow[0], kill: kill[0], hs2_v: hs2_v[0], hs2: hs2[ArchW-1:0], cls: cls[NumCls-1:0],
+            vslow: cls[NumCls+VslowW-1:NumCls],   // the file keeps the speed hint above the classes
             nblk: nblk[NblkW-1:0], kern: kern[KernW-1:0], arg: arg[ArgW-1:0], len: len[LenW-1:0],
             addr: addr[AddrW-1:0]};
       prog.push_back(i);
@@ -231,6 +232,9 @@ module tb_tsched;
   localparam int unsigned InFlightMax = (DmaInFlight < ChunksPerGroup) ? ((DmaInFlight > 0) ? DmaInFlight : 1) : ChunksPerGroup;
   int unsigned dma_stall = 0;
   initial void'($value$plusargs("DMA_STALL=%d", dma_stall));
+  bit trace_place, trace_blk;
+  initial trace_place = $test$plusargs("TRACE_PLACE");
+  initial trace_blk   = $test$plusargs("TRACE_BLK");     // every block start, with its PE and its task
   for (genvar g = 0; g < NumGroups; g++) begin : gen_dma
     int unsigned       q_left [$];     // cycles each chunk in flight needs once the engine works on it
     logic [AddrW-1:0]  load_addr;
@@ -301,6 +305,7 @@ module tb_tsched;
           automatic int unsigned d;
           cur = b;
           last_event = cycle;
+          if (trace_blk) $display("[tb] T %0d start %s group %0d pe %0d task %0d block %0d domain %0d", cycle, (Cls == ClsT) ? "tensor" : "vector", g, p, b.arg, b.bidx, b.dom);
           if (t >= n_tasks) begin
             err($sformatf("block of unknown task %0d", t));
           end else begin
@@ -361,6 +366,13 @@ module tb_tsched;
     if (rst_n) begin
       cycle <= cycle + 1;
       st_win_sum += i_dut.i_backend.i_window.cnt_q;
+      // +TRACE_PLACE: where every load and every task is sent, for studies of the placement.
+      if (trace_place) begin
+        for (int unsigned d = 0; d < NumDomains; d++) begin
+          if (i_dut.i_backend.load_valid_o[d]) $display("[tb] T %0d load %0d domain %0d", cycle, i_dut.i_backend.load_o.wid, d);
+          if (i_dut.i_backend.run_valid_o[d])  $display("[tb] T %0d run %0d domain %0d", cycle, i_dut.i_backend.run_o.wid, d);
+        end
+      end
       if (i_dut.i_backend.i_window.cnt_q > st_win_max) st_win_max = i_dut.i_backend.i_window.cnt_q;
       if ($countones(i_dut.i_backend.i_run_iq.valid_q) > st_riq_max)
         st_riq_max = $countones(i_dut.i_backend.i_run_iq.valid_q);

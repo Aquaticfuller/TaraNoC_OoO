@@ -11,6 +11,8 @@ schedulers cut them into blocks and hand the blocks to idle PEs.
 | `hw/src` | RTL of the task scheduler (`tsched_*`) |
 | `hw/tb` | Testbench: the host, the DMA engines and the PEs are models |
 | `scripts/gen_program.py` | Task programs for the testbench: random ones, and MoE layers cut as the system model cuts them |
+| `scripts/gemm_prog.py` | Task programs for the real cluster hardware: one matrix task on a loaded tile and its check (`sys/prog/*`) |
+| `scripts/trace_blocks.py` | The blocks of a hardware run (start, end, PE, domain) from its trace, as JSON |
 | `sim` | Simulation flow (VCS) |
 | `sysmodel` | Event-driven system model of the cluster |
 | `arch` | Generator of the architecture figure (draw.io); the figure follows the RTL |
@@ -26,7 +28,7 @@ schedulers cut them into blocks and hand the blocks to idle PEs.
 | `tsched_handle_file` | State and lifetime of handles; releases a handle and its L1 slot when its last user is done |
 | `tsched_load_issue` | Loads in program order, each to the least loaded domain that can stream now |
 | `tsched_run_iq` | Runs wait for their handles; the oldest ready one goes to the domain that holds its data |
-| `tsched_domain` | Domain scheduler: block cutting, stream following, dispatch, join counters; gives blocks to and takes blocks from other domains on command of the cluster level |
+| `tsched_domain` | Domain scheduler: block cutting, stream following, dispatch, join counters; gives blocks to and takes blocks from other domains on command of the cluster level. A task for both PE classes may carry a speed hint (`vslow`): its blocks then go to vector units only while the tensor engines that work for the domain have a long backlog and none within reach is idle |
 | `tsched_balance` | Balancer of the cluster level: moves single blocks from domains with waiting blocks to domains with idle PEs, at most `BalReach` steps apart |
 | `tsched_group_disp` | Group dispatcher: next-block register per PE class, PE start and completion |
 | `tsched_age_sel`, `tsched_rr_sel`, `tsched_argmin`, `tsched_first_oh`, `tsched_oh_mux` | Selects: oldest first, round robin with a one-hot grant, minimum search, first set bit, one-hot multiplexer |

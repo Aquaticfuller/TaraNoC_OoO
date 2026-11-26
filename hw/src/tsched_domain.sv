@@ -20,6 +20,13 @@
 //           The decision is built so that everything it needs is prepared in parallel: the flags of the
 //           tasks are registers, each tier of requests has its own select with a one-hot grant, and the
 //           counters have both outcomes ready. See the comments at each part.
+// PE types  A task that both PE classes may run can carry a speed hint (vslow): a block takes about 2^vslow
+//           times as long on a vector unit. Vector units then get its blocks only while that pays: the
+//           tensor engines that work for the domain (its own, and those that run its blocks elsewhere)
+//           would need longer for the blocks that wait than one vector block takes, and no domain within
+//           reach has tensor engines without work. No block of such a task is prepared behind a busy
+//           vector unit, and while the domain holds such a task its vector units ask no other domain for
+//           blocks.
 // Balance   The domain tells the cluster level how many groups have an idle PE and nothing to run, and
 //           whether it has blocks that no own PE can take now. On a give command of the cluster level it
 //           hands one block of its own tasks to another domain; the block travels through the cluster
@@ -166,6 +173,9 @@ module tsched_domain import tsched_pkg::*; #(
   logic  [T-1:0]             t_valid_d, t_valid_q;
   wid_t  [T-1:0]             t_wid_q;
   cls_t  [T-1:0]             t_cls_q;
+  vslow_t [T-1:0]            t_vslow_q;
+  logic  [T-1:0]             t_vok_d, t_vok_q;       // vector units may take blocks of the task
+  logic  [T-1:0]             t_hv_d, t_hv_q;         // ... and the task has a speed hint
   nblk_t [T-1:0]             t_nblk_q;
   nblk_t [T-1:0]             t_next_d, t_next_q;     // blocks handed out
   nblk_t [T-1:0]             t_left_d, t_left_q;     // blocks that may be handed out and have not been
@@ -256,6 +266,38 @@ module tsched_domain import tsched_pkg::*; #(
     end
   end
 
+  // Tensor backlog: the blocks not handed out yet of the tasks that tensor engines may run. Two counters that
+  // wrap, the blocks that arrived with tasks and the blocks handed out, and their difference one cycle later.
+  // So the decision of the cycle only steps a counter, and the wide additions start at registers.
+  logic [BlkCntW-1:0]      tb_in_d, tb_in_q, tb_out_d, tb_out_q, tb_q;
+  logic [T-1:0]            t_ten;
+  logic [2**VslowW-1:0]    tb_over;      // the backlog exceeds what the tensor engines finish in 2^k - 1 block times
+  logic                    v_near;       // a tensor engine within reach is, or is about to be, without work
+
+  for (genvar t = 0; t < T; t++) begin : gen_ten
+    assign t_ten[t] = t_cls_q[t][ClsT];
+  end
+  logic cut_ten;       // the block cut this cycle is of a task that tensor engines may run (set with cut_oh)
+  assign tb_in_d  = tb_in_q + ((run_valid_i && run_i.cls[ClsT]) ? BlkCntW'(run_i.nblk) : '0);
+  assign tb_out_d = cut_ten ? tb_out_q + BlkCntW'(1) : tb_out_q;
+
+  // A task that names both classes with a hint keeps its blocks off the vector units unless the backlog
+  // is large enough (tb_over, below) and no tensor engine within reach is without work (a block there ends
+  // sooner than on a vector unit here). The flag is a register, read by the candidate logic in place of the
+  // class bit; it follows the backlog a few cycles late.
+  always_comb begin
+    for (int unsigned t = 0; t < T; t++) begin
+      t_vok_d[t] = t_cls_q[t][ClsV] & (~t_cls_q[t][ClsT] | (t_vslow_q[t] == '0)
+                                       | (tb_over[t_vslow_q[t]] & ~v_near));
+      // A new task with a hint starts with the vector units held; its fields are in the table next cycle.
+      t_hv_d[t] = t_vok_d[t] & t_cls_q[t][ClsT] & (t_vslow_q[t] != '0);
+      if (ins_oh[t]) begin
+        t_vok_d[t] = run_i.cls[ClsV] & (~run_i.cls[ClsT] | (run_i.vslow == '0));
+        t_hv_d[t]  = 1'b0;
+      end
+    end
+  end
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       t_valid_q <= '0;
@@ -263,12 +305,22 @@ module tsched_domain import tsched_pkg::*; #(
       t_spare_q <= '0;
       t_inc_q   <= '0;
       t_dec_q   <= '0;
+      t_vok_q   <= '0;
+      t_hv_q    <= '0;
+      tb_q      <= '0;
+      tb_in_q   <= '0;
+      tb_out_q  <= '0;
     end else begin
       t_valid_q <= t_valid_d;
       t_avail_q <= t_avail_d;
       t_spare_q <= t_spare_d;
       t_inc_q   <= t_inc_d;
       t_dec_q   <= t_dec_d;
+      t_vok_q   <= t_vok_d;
+      t_hv_q    <= t_hv_d;
+      tb_q      <= tb_in_q - tb_out_q;
+      tb_in_q   <= tb_in_d;
+      tb_out_q  <= tb_out_d;
     end
   end
 
@@ -281,6 +333,7 @@ module tsched_domain import tsched_pkg::*; #(
     if (run_valid_i) begin
       t_wid_q[ins_idx]    <= run_i.wid;
       t_cls_q[ins_idx]    <= run_i.cls;
+      t_vslow_q[ins_idx]  <= run_i.vslow;
       t_nblk_q[ins_idx]   <= run_i.nblk;
       t_follow_q[ins_idx] <= run_i.follow & run_i.slot_v;
       t_slot_v_q[ins_idx] <= run_i.slot_v;
@@ -302,7 +355,7 @@ module tsched_domain import tsched_pkg::*; #(
   for (genvar c = 0; c < NumCls; c++) begin : gen_cand
     logic [T-1:0] own_excl, own_any, lend_excl, lend_any;
     for (genvar t = 0; t < T; t++) begin : gen_t
-      assign own_any[t]   = t_avail_q[t] & t_cls_q[t][c];
+      assign own_any[t]   = t_avail_q[t] & ((c == ClsV) ? t_vok_q[t] : t_cls_q[t][c]);
       assign own_excl[t]  = own_any[t] & (t_cls_q[t] == (cls_t'(1) << c));
       assign lend_any[t]  = own_any[t] & t_spare_q[t];
       assign lend_excl[t] = own_excl[t] & t_spare_q[t];
@@ -375,6 +428,10 @@ module tsched_domain import tsched_pkg::*; #(
   localparam int unsigned NumOwn = G * NumCls;
 
   logic [NumOwn-1:0] r_urg, r_pre, g_urg, g_pre;
+
+  // A task with a speed hint has a block that vector units may take.
+  logic v_nopre;
+  assign v_nopre = |(t_avail_q & t_hv_q);
   logic              any_urg, any_pre;
   logic              sel_g, sel_b, sel_u, sel_p;
 
@@ -382,7 +439,10 @@ module tsched_domain import tsched_pkg::*; #(
     for (genvar c = 0; c < NumCls; c++) begin : gen_c
       assign r_urg[g * NumCls + c] = urg[g][c] & has_own[c];
       // No block is prepared in advance for a class another domain wants: it could not be given away.
-      assign r_pre[g * NumCls + c] = pre[g][c] & has_own[c] & ~(BalEn & BalHold & wanted_i[c]);
+      // Nor for a vector unit while a task with a speed hint could supply it: a block parked behind a busy
+      // vector unit starts a whole vector block later, and the hint says a tensor engine is faster.
+      assign r_pre[g * NumCls + c] = pre[g][c] & has_own[c] & ~(BalEn & BalHold & wanted_i[c])
+                                   & ~((c == ClsV) & v_nopre);
     end
   end
 
@@ -466,6 +526,54 @@ module tsched_domain import tsched_pkg::*; #(
   end
 
   assign cut_oh = ({T{sel_g}} & k_give) | ({T{sel_u}} & k_urg) | ({T{sel_p}} & k_pre);
+  // The same choice, reduced per tier in parallel, so that the backlog counter sees it as early as the tasks do.
+  assign cut_ten = (sel_g & (|(k_give & t_ten))) | (sel_u & (|(k_urg & t_ten))) | (sel_p & (|(k_pre & t_ten)));
+
+  // -------------------------------------------------------------------------------------------
+  // Speed hint: how long the tensor engines need for the backlog
+  // -------------------------------------------------------------------------------------------
+  // eng: the tensor engines that work on tasks of this domain, its own and one per block that runs in another
+  // domain (given away and not back yet; a block given to a vector unit there is counted too, since a
+  // completion does not tell the class: a small overestimate). With a hint 2^k, a vector unit takes a block only while the backlog
+  // exceeds what these engines finish in 2^k - 1 block times: they are busy for up to one block time more, so
+  // they need up to 1 + backlog / eng, and the vector unit needs 2^k. When a block has come back, the vector
+  // units also wait a few cycles: the engine that ran it is idle, and the news that it wants another block
+  // (wanted_i) is still on its way.
+  localparam int unsigned ThrW    = BlkCntW + VslowW + 1;
+  localparam int unsigned RetHold = 15;
+  logic [BlkCntW-1:0]                  eng_d, eng_q;
+  logic [2**VslowW-1:1][ThrW-1:0]      thr_d, thr_q;
+  logic [3:0]                          rhold_d, rhold_q;
+  logic                                give_ok;
+
+  assign give_ok = d_v_q & d_give_q & (|d_oh_q);
+  assign v_near  = BalEn & VecHoldNear & (wanted_i[ClsT] | (rhold_q != '0));
+
+  always_comb begin
+    eng_d = eng_q;
+    if (give_ok && !ret_valid_i) eng_d = eng_q + BlkCntW'(1);
+    if (!give_ok && ret_valid_i) eng_d = eng_q - BlkCntW'(1);
+    rhold_d = rhold_q;
+    if (rhold_q != '0) rhold_d = rhold_q - 4'd1;
+    if (ret_valid_i)   rhold_d = 4'(RetHold);
+    tb_over[0] = 1'b1;
+    for (int unsigned k = 1; k < 2**VslowW; k++) begin
+      thr_d[k]   = ThrW'(eng_q) * ThrW'((1 << k) - 1);
+      tb_over[k] = ThrW'(tb_q) > thr_q[k];
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      eng_q   <= BlkCntW'(DomTensor);
+      rhold_q <= '0;
+      for (int unsigned k = 1; k < 2**VslowW; k++) thr_q[k] <= ThrW'(DomTensor * ((1 << k) - 1));
+    end else begin
+      eng_q   <= eng_d;
+      rhold_q <= rhold_d;
+      thr_q   <= thr_d;
+    end
+  end
 
   // The next-block register that gets a block, one-hot over group and class.
   logic [G-1:0][NumCls-1:0] send_oh;
@@ -549,12 +657,19 @@ module tsched_domain import tsched_pkg::*; #(
   // Report to the cluster level
   // -------------------------------------------------------------------------------------------
   // want: groups with an idle PE of the class, an empty register, and no own block for that class.
+  //       Vector units do not ask for blocks while the domain holds a task with a speed hint: it keeps them
+  //       free on purpose, or will need them itself, and a block of another domain would wait behind them.
   // give: a task can spare a block for the class and no own register with an idle PE waits for one.
   rep_t rep_d;
+  logic has_hint;
+  always_comb begin
+    has_hint = 1'b0;
+    for (int unsigned t = 0; t < T; t++) has_hint |= t_valid_q[t] & t_cls_q[t][ClsT] & t_cls_q[t][ClsV] & (t_vslow_q[t] != '0);
+  end
   always_comb begin
     rep_d = '0;
     for (int unsigned c = 0; c < NumCls; c++) begin
-      if (BalEn && !has_own[c]) begin
+      if (BalEn && !has_own[c] && !((c == ClsV) && has_hint)) begin
         for (int unsigned g = 0; g < G; g++) rep_d.want[c] += WantW'(urg[g][c]);
       end
       rep_d.give[c] = BalEn & has_lend[c] & ~any_urg;
@@ -679,6 +794,9 @@ module tsched_domain import tsched_pkg::*; #(
       assert (!(load_valid_i && ld_active_q && !ld_take))
         else $error("[tsched_domain %0d] load while a load is streaming", DomId);
       for (int unsigned g = 0; g < G; g++) assert (!(dma_done_i[g] && (ld_issued_q[g] == ld_cdone_q[g]))) else $error("[tsched_domain %0d] DMA completion without a chunk", DomId);
+      assert (!(ret_valid_i && !give_ok && (eng_q == BlkCntW'(DomTensor))))
+        else $error("[tsched_domain %0d] a block came back that was not away", DomId);
+      assert (cut_ten == (|(cut_oh & t_ten))) else $error("[tsched_domain %0d] backlog counter out of step", DomId);
       assert ($onehot0(cut_oh)) else $error("[tsched_domain %0d] block cut from two tasks", DomId);
       assert ($onehot0(send_oh)) else $error("[tsched_domain %0d] block sent to two registers", DomId);
       assert ((send_oh & ~gcred_q) == '0) else $error("[tsched_domain %0d] block sent to a full register", DomId);
@@ -689,6 +807,8 @@ module tsched_domain import tsched_pkg::*; #(
       for (int unsigned t = 0; t < T; t++) begin
         assert (!(t_valid_q[t] && (32'(t_dec_q[t]) > 32'(t_out_q[t]))))
           else $error("[tsched_domain %0d] task %0d: more completions than blocks running", DomId, t);
+        assert (!(t_valid_q[t] && t_cls_q[t][ClsT] && (32'(BlkCntW'(tb_in_q - tb_out_q)) < 32'(t_nblk_q[t] - t_next_q[t]))))
+          else $error("[tsched_domain %0d] task %0d: tensor backlog below the blocks the task has left", DomId, t);
         assert (!(cut_oh[t] && !t_avail_q[t]))
           else $error("[tsched_domain %0d] task %0d: block cut without an eligible one", DomId, t);
         assert (!(ret_valid_i && (ret_tix_i == tix_t'(t)) && !t_valid_q[t]))
