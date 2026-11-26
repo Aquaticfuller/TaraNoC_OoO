@@ -23,6 +23,9 @@ Three ways to say that:
   --order stage  all tasks of stage 1 first, then all of stage 2, then all of stage 3
 
 usage: chain_prog.py <out dir> [--blocks 128] [--rows 4] [--cut 1] [--follow 0] [--order chain] [--warm 64] [--home 0]
+                     [--wload 0]
+       --wload 1: stage 3 has weights of its own: a second TLoad brings W into a slot, which the scheduler
+       places where it finds room (another domain when there are several), and stage 3 names it as its data
        --home 1: stages 2 and 3 name the load as their data too, so they are issued to the domain of stage 1
 One line of prog.txt: op hd_v hd hs1_v hs1 follow kill hs2_v hs2 cls nblk kern arg len addr (see gen_program.py);
 the follow field is 2 for a chained task.
@@ -45,6 +48,7 @@ ap.add_argument('--order', default='chain', choices=('chain', 'stage'))
 ap.add_argument('--warm', type=int, default=64)
 ap.add_argument('--home', type=int, default=0, choices=(0, 1))
 ap.add_argument('--follow', type=int, default=0, choices=(0, 1))
+ap.add_argument('--wload', type=int, default=0, choices=(0, 1))
 a = ap.parse_args()
 
 rows = a.blocks * a.rows
@@ -63,7 +67,7 @@ def ins(op, hd=None, hs1=None, follow=0, kill=0, hs2=None, cls=0, nblk=0, kern=0
                                        int(hs2 is not None), hs2 or 0, cls, nblk, kern, arg, length, addr)))
 
 
-H_LOAD = 1
+H_LOAD, H_W = 1, 2
 # Handles of the three stages of a chain. With --order chain the next chain defines the same three again (the
 # scheduler renames them); with --order stage every chain needs its own.
 if a.order == 'chain':
@@ -77,6 +81,8 @@ def stage(c, s):
     arg = a.rows | ((c * per) << 8)
     h = hnd[c]
     data = H_LOAD if (s == 0 or a.home) else None
+    if s == 2 and a.wload:
+        data = H_W
     f = 2 * a.follow                    # the chain flag, in the follow field
     take, leave = (lambda n: (n << 24) * a.follow), (lambda n: (n << 26) * a.follow)
     if s == 0:
@@ -91,6 +97,8 @@ if a.warm:
     ins(RUN, hd=7, cls=CLS_T, nblk=a.warm, kern=K_SPIN)
     ins(JOIN, hd=8, arg=1)
 ins(LOAD, hd=H_LOAD, length=nbytes, addr='@l2_X')
+if a.wload:
+    ins(LOAD, hd=H_W, length=16384, addr='@l2_W')      # W is 8 KiB; a load is a multiple of 16 KiB
 if a.order == 'chain':
     for c in range(a.cut):
         for s in range(3):
@@ -101,6 +109,8 @@ else:
             stage(c, s)
 ins(JOIN, hd=4)
 ins(FREE, hs1=H_LOAD)
+if a.wload:
+    ins(FREE, hs1=H_W)
 ins(RUN, hd=5, hs2=4, cls=CLS_T, nblk=parts, kern=K_CHECK2, arg=elems)
 ins(JOIN, hd=6)
 ins(RUN, hd=9, hs2=6, cls=CLS_T, nblk=1, kern=K_REPORT, arg=parts | (elems << 8))

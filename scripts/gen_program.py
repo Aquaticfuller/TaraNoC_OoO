@@ -63,6 +63,7 @@ NBLK_MAX = 1023     # blocks of one task (NblkW in tsched_pkg)
 class Program:
     def __init__(self):
         self.instr, self.tasks, self.addr = [], [], 0x1000
+        self.followed = set()       # tasks that already have a chained follower (a task has room for one)
 
     def load(self, hd, nbytes):
         nbytes = max(CHUNK, int(math.ceil(nbytes / CHUNK)) * CHUNK)
@@ -76,7 +77,12 @@ class Program:
         assert 1 <= nblk <= NBLK_MAX and 0 <= vslow <= 3 and (vslow == 0 or cls == CLS_ANY)
         chain = bool(chain and hs2 is not None)
         assert not chain or (dep >= 0 and self.tasks[dep][2] == nblk), 'a chained task has as many blocks as the task it follows'
-        self.tasks.append((t, cls, nblk, int(bool(follow and hs1 is not None and not chain)) | (2 if chain else 0), need, dep, dur_t, dur_v))
+        # The instruction keeps its chain flag, but the scheduler chains only the first follower of a task: a
+        # second one waits for the whole task (and may follow its stream, like any task).
+        eff = chain and dep not in self.followed
+        if eff:
+            self.followed.add(dep)
+        self.tasks.append((t, cls, nblk, int(bool(follow and hs1 is not None and not eff)) | (2 if eff else 0), need, dep, dur_t, dur_v))
         self.instr.append((RUN, int(hd is not None), hd or 0, int(hs1 is not None), hs1 or 0, int(follow) | (2 if chain else 0), int(kill),
                            int(hs2 is not None), hs2 or 0, cls | (vslow << 2), nblk, 0, t, 0, 0))
         return t
@@ -219,9 +225,16 @@ def gen_chain(a):
         for c, s in order:
             hd = (20 + s) if a.order == 'chain' else (10 + 3 * (i * a.cut + c) + s)
             data = h if (s == 0 or a.home) else None
+            if s == 2 and a.wload:
+                # Stage 3 has weights of its own: a tile the scheduler places where it finds room.
+                data = 9 + i
+                if c == 0:
+                    p.load(data, a.blocks * 512)
             prev[c] = p.run(CLS_V if s == 1 else CLS_T, per, dt, ds, hs1=data, hd=hd,
                             hs2=None if s == 0 else hd - 1, dep=-1 if s == 0 else prev[c], chain=bool(a.follow))
         p.free(h)
+        if a.wload:
+            p.free(9 + i)
     p.join(31)
     p.write(a.out, mesh, hops)
     print('chain: %d matrices, %d blocks each, cut into %d chains, %s order' % (a.tasks, a.blocks, a.cut, a.order))
@@ -354,5 +367,6 @@ if __name__ == '__main__':
     ap.add_argument('--order', default='chain', choices=('chain', 'stage'), help='chain: program order of the tasks')
     ap.add_argument('--home', type=int, default=0, help='chain: 1 issues every stage to the domain of the load')
     ap.add_argument('--follow', type=int, default=0, help='chain: 1 sets the chain flag of stages 2 and 3')
+    ap.add_argument('--wload', type=int, default=0, help='chain: 1 gives stage 3 a load of its own (its weights)')
     a = ap.parse_args()
     {'random': gen_random, 'moe': gen_moe, 'hint': gen_hint, 'chain': gen_chain}[a.mode](a)
