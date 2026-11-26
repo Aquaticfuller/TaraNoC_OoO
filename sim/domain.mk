@@ -9,6 +9,8 @@
 #   make -f domain.mk setup            links for the toolchains and for a recent Python (once)
 #   make -f domain.mk hw               build the simulator (VCS)
 #   make -f domain.mk sw APP=<name>    build a program of software/apps/baremetal
+#   make -f domain.mk swclean          remove the built software (needed when CONFIG changes: the runtime
+#                                      objects are compiled for one configuration)
 #   make -f domain.mk run APP=<name> PROG=<dir>   simulate it under the task scheduler
 #
 # TeraMonster and the dependencies it changes live in working_dir/ as `bender clone`s with local commits
@@ -29,6 +31,9 @@ TIMEOUT ?= 300000
 # The program must print "check PASS" (the programs that compute and check a matrix). CHECK=0: no such line
 # is expected (probes, loads without a check).
 CHECK   ?= 1
+# SW=0: do not rebuild the PE program before a run (several runs at a time, each in its own BUILD, must not
+# rebuild it under each other; build it once with `sw` first).
+SW      ?= 1
 # Toolchains (LLVM, GCC, Bender 0.31 for the software flow) of an existing TeraMonster installation.
 TOOLS   ?= /usr/scratch/badile48/msc26f31/teranoc/TeraNoC/install
 # The FlooNoC generator needs Python 3.10 or newer with pydantic, networkx, mako, ruamel.yaml and click.
@@ -49,7 +54,7 @@ LINKED  := $(BUILD)/prog
 HWMAKE  = $(ENV) $(MAKE) -C $(TM)/hardware config=$(CONFIG) buildpath=$(BUILD) bender="bender -d $(ROOT)" \
           vlogan_args="$(VLOGAN)" vcs_args="+PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(LINKED) $$PLUS +TIMEOUT=$(TIMEOUT) -assert nopostproc $(ARGS)"
 
-.PHONY: setup hw sw run
+.PHONY: setup hw sw swclean run
 
 setup:
 	mkdir -p $(PYBIN) $(TM)/install
@@ -62,9 +67,12 @@ hw:
 sw:
 	$(ENV) $(MAKE) -C $(TM)/software/apps/baremetal $(APP) config=$(CONFIG) COMPILER=llvm
 
+swclean:
+	$(ENV) $(MAKE) -C $(TM)/software/apps/baremetal clean config=$(CONFIG) > /dev/null
+
 # The cores never leave their PE loop, so the cluster testbench reports no end of computation; the harness
 # ends the run and prints the verdict.
-run: sw
+run: $(if $(filter 1,$(SW)),sw)
 	mkdir -p $(BUILD) && rm -f $(BUILD)/transcript $(BUILD)/run.log
 	@PLUS=$$($(PYBIN)/python3 $(ROOT)/scripts/link_prog.py $(PROG)/prog.txt $(TM)/software/bin/apps/baremetal/$(APP) $(LINKED)) \
 	  || { echo "verdict: FAIL (the program could not be linked)"; exit 1; }; \

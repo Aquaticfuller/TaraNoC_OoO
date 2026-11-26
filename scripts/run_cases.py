@@ -10,6 +10,7 @@ domain that holds their weights. One simulation runs at a time.
 
 usage: run_cases.py <json_out> [case ...]      case = kind:n:regime, default: the list below
        EXTRA_DEFS="+define+..." in the environment adds defines to both builds (separate build directories)
+       GEN_ARGS="--vslow" in the environment adds arguments to gen_program.py (separate program directories)
 """
 import json
 import os
@@ -23,6 +24,8 @@ SIM = os.path.join(ROOT, 'sim')
 CASES = ['decode:1:x4', 'sessions:16:x4', 'midfill:64:x4', 'midfill:64:x1', 'midfill:256:x1', 'midfill:1024:x1']
 SLOTS = 2
 EXTRA = os.environ.get('EXTRA_DEFS', '')
+GEN = os.environ.get('GEN_ARGS', '')
+GTAG = ''.join(c if c.isalnum() else '_' for c in GEN).rstrip('_')
 TAG = ('_' + ''.join(c if c.isalnum() else '_' for c in EXTRA.replace('+define+', ''))).rstrip('_') if EXTRA else ''
 BUILDS = {False: ('full_s2' + TAG, ('+define+TSCHED_SLOTS_PER_DOMAIN=%d ' % SLOTS) + EXTRA),
           True: ('full_s2_bound' + TAG, ('+define+TSCHED_SLOTS_PER_DOMAIN=%d +define+TB_NO_LEND ' % SLOTS) + EXTRA)}
@@ -36,9 +39,9 @@ def run_case(case, layers='9', block=500, vec=8):
     kind, n, regime = case.split(':')
     out = {}
     for bound, (cfg, defs) in BUILDS.items():
-        d = os.path.join(SIM, 'prog', '%s_%s_%s%s' % (kind, n, regime, '_bound' if bound else ''))
-        sh('python3 -I %s/gen_program.py moe %s --kind %s --n %s --regime %s --layers %s --block %d --vec %d --slots %d %s'
-           % (HERE, d, kind, n, regime, layers, block, vec, SLOTS, '--bound' if bound else ''))
+        d = os.path.join(SIM, 'prog', '%s_%s_%s%s%s' % (kind, n, regime, '_bound' if bound else '', GTAG))
+        sh('python3 -I %s/gen_program.py moe %s --kind %s --n %s --regime %s --layers %s --block %d --vec %d --slots %d %s %s'
+           % (HERE, d, kind, n, regime, layers, block, vec, SLOTS, '--bound' if bound else '', GEN))
         m = json.load(open(os.path.join(d, 'model.json')))
         sh('make compile CFG=%s DEFS="%s"' % (cfg, defs), cwd=SIM)
         sh('make run CFG=%s PROG=%s ARGS="+LANE_BPC100=%d"' % (cfg, d, m['lane_bpc100']), cwd=SIM)

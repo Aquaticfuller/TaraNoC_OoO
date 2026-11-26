@@ -14,7 +14,8 @@ Two kinds of program
 Files written to the output directory
   prog.txt   one task instruction per line:
              op hd_v hd hs1_v hs1 follow kill hs2_v hs2 cls nblk kern arg len addr
-             op: 0 TLoad, 1 TRun, 2 TJoin, 3 TFree; cls: bit 0 tensor engines, bit 1 vector units;
+             op: 0 TLoad, 1 TRun, 2 TJoin, 3 TFree; cls: bit 0 tensor engines, bit 1 vector units,
+             bits 3:2 the speed hint vslow of a task for both (a block takes 2^vslow times as long on a vector unit);
              arg of a TRun is its task index
   tasks.txt  first line: number of run tasks; then per task
              index cls nblk follow need dep  T[0..H-1] V[0..H-1]
@@ -23,10 +24,14 @@ Files written to the output directory
   hop.txt    first line: groups domains H; then per group, the distance index to each domain
   model.json (moe) what the system model predicts for the same layers
 
+  hint    one or several equal matrix tasks, each on its own load (so each in its own domain), with block times
+          as measured on the cluster hardware: for the rule that shares a task between the two PE types
+
 usage
   gen_program.py random <out_dir> [--side 4] [--seed 1] [--pieces 200] [--slots 4]
+  gen_program.py hint <out_dir> [--side 2] [--blocks 128] [--tasks 1] [--cls 3] [--hint 2] [--tdur 860] [--vdur 3500]
   gen_program.py moe <out_dir> --kind midfill --n 64 [--regime x1] [--layers 1] [--block 500] [--vec 8]
-                 [--seed 11] [--trace <dir>] [--synthetic]
+                 [--seed 11] [--trace <dir>] [--synthetic] [--vslow]
 """
 import argparse
 import json
@@ -58,12 +63,12 @@ class Program:
         self.instr.append((LOAD, 1, hd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, nbytes, self.addr))
         self.addr += nbytes
 
-    def run(self, cls, nblk, dur_t, dur_v, hs1=None, follow=False, kill=False, hs2=None, hd=None, need=0, dep=-1):
+    def run(self, cls, nblk, dur_t, dur_v, hs1=None, follow=False, kill=False, hs2=None, hd=None, need=0, dep=-1, vslow=0):
         t = len(self.tasks)
-        assert 1 <= nblk <= NBLK_MAX
+        assert 1 <= nblk <= NBLK_MAX and 0 <= vslow <= 3 and (vslow == 0 or cls == CLS_ANY)
         self.tasks.append((t, cls, nblk, int(bool(follow and hs1 is not None)), need, dep, dur_t, dur_v))
         self.instr.append((RUN, int(hd is not None), hd or 0, int(hs1 is not None), hs1 or 0, int(follow), int(kill),
-                           int(hs2 is not None), hs2 or 0, cls, nblk, 0, t, 0, 0))
+                           int(hs2 is not None), hs2 or 0, cls | (vslow << 2), nblk, 0, t, 0, 0))
         return t
 
     def join(self, hd):
@@ -134,7 +139,9 @@ def gen_random(a):
             if rng.random() < 0.3:
                 hd = rng.randrange(16, 24)
                 joins.pop(hd, None)
-            t = p.run(rng.choice((CLS_T, CLS_V, CLS_ANY, CLS_ANY)), rng.choice((1, 1, 2, 3, 5, 8, 13, 40)), dur(), dur(), hd=hd, **kw)
+            c = rng.choice((CLS_T, CLS_V, CLS_ANY, CLS_ANY))
+            t = p.run(c, rng.choice((1, 1, 2, 3, 5, 8, 13, 40, 90)), dur(), dur(), hd=hd,
+                      vslow=rng.choice((0, 1, 1, 2, 3)) if c == CLS_ANY else 0, **kw)
             if hd is not None:
                 producer[hd] = t
         elif r < 0.92:
@@ -151,6 +158,22 @@ def gen_random(a):
     p.join(31)
     p.write(a.out, mesh, hops)
     print('random: %d instructions, %d run tasks, %d domains' % (len(p.instr), len(p.tasks), mesh.R))
+
+
+# --------------------------------------------------------------------------------------------- hint
+def gen_hint(a):
+    mesh = Mesh(2 * a.side, 4)
+    hops = hop_values(mesh)
+    p = Program()
+    # A block that runs in another domain was about 5% slower on the hardware.
+    dt = [a.tdur if h == 0 else int(a.tdur * 1.05) for h in hops]
+    dv = [a.vdur if h == 0 else int(a.vdur * 1.05) for h in hops]
+    for i in range(a.tasks):
+        p.load(1 + i, a.blocks * 512)
+        p.run(a.cls, a.blocks, dt, dv, hs1=1 + i, follow=True, kill=True, vslow=a.hint if a.cls == CLS_ANY else 0)
+    p.join(31)
+    p.write(a.out, mesh, hops)
+    print('hint: %d tasks of %d blocks, cls %d, hint %d' % (a.tasks, a.blocks, a.cls, a.hint))
 
 
 # --------------------------------------------------------------------------------------------- moe
@@ -197,7 +220,9 @@ def gen_moe(a):
             nb = min(NBLK_MAX, max(1, min(kmax, int(math.ceil(T / sc.min_block_cycles)))))
             dur = [[max(1, int(math.ceil(pf / nb / sim.rate[ci] * slow_factor(sim.cls[ci], system, n, h)))) for h in hops] for ci in (ct, cv)]
             p.load(1, nbytes / k)
-            p.run(CLS_ANY if small else CLS_T, nb, dur[0], dur[1], hs1=1, follow=True, kill=True, hs2=hs2, need=need)
+            # The hint a program would give: how much longer a block takes on a vector unit, as a power of two.
+            vs = min(3, max(0, int(round(math.log2(dur[1][0] / dur[0][0]))))) if (small and a.vslow) else 0
+            p.run(CLS_ANY if small else CLS_T, nb, dur[0], dur[1], hs1=1, follow=True, kill=True, hs2=hs2, need=need, vslow=vs)
 
     prev = None                                   # the join that ends the previous layer
     for routing in layers:
@@ -249,7 +274,7 @@ def gen_moe(a):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('mode', choices=('random', 'moe'))
+    ap.add_argument('mode', choices=('random', 'moe', 'hint'))
     ap.add_argument('out')
     ap.add_argument('--side', type=int, default=4, help='domains per side (random)')
     ap.add_argument('--seed', type=int, default=11)
@@ -266,5 +291,12 @@ if __name__ == '__main__':
     ap.add_argument('--bound', action='store_true', help='model: blocks only run in the domain that holds their weights')
     ap.add_argument('--trace', default=None)
     ap.add_argument('--synthetic', action='store_true', help='draw the routing from a Zipf law instead of the trace')
+    ap.add_argument('--vslow', action='store_true', help='moe: give the tasks for both PE types their speed hint')
+    ap.add_argument('--blocks', type=int, default=128, help='hint: blocks of a task')
+    ap.add_argument('--tasks', type=int, default=1, help='hint: tasks, each with its own load')
+    ap.add_argument('--cls', type=int, default=3, help='hint: PE types of the tasks (1 tensor, 2 vector, 3 both)')
+    ap.add_argument('--hint', type=int, default=2, help='hint: speed hint of the tasks (cls 3)')
+    ap.add_argument('--tdur', type=int, default=860, help='hint: cycles of a block on a tensor engine')
+    ap.add_argument('--vdur', type=int, default=3500, help='hint: cycles of a block on a vector unit')
     a = ap.parse_args()
-    (gen_random if a.mode == 'random' else gen_moe)(a)
+    {'random': gen_random, 'moe': gen_moe, 'hint': gen_hint}[a.mode](a)
