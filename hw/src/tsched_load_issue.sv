@@ -34,6 +34,8 @@ module tsched_load_issue import tsched_pkg::*; (
   input  logic                                slot_free_valid_i,
   input  dom_t                                slot_free_dom_i,
   input  slot_t                               slot_free_i,
+  // a task is issued in the next cycle: no load then, so that the handle file is written once per cycle
+  input  logic                                hold_i,
   // issue, registered
   output logic [NumDomains-1:0]               load_valid_o,
   output load_req_t                           load_o,
@@ -133,7 +135,7 @@ module tsched_load_issue import tsched_pkg::*; (
   );
   assign slot_none = ~(|best_free);
 
-  assign issue = q_valid & (|(elig & best_oh)) & (lanes_q >= LaneW'(LanesPerLoad));
+  assign issue = q_valid & (|(elig & best_oh)) & (lanes_q >= LaneW'(LanesPerLoad)) & ~hold_i;
   assign q_pop = issue;
 
   always_comb begin

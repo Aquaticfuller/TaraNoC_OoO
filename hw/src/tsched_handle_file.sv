@@ -6,6 +6,8 @@
 //
 // State
 //   placed    the handle is data in an L1 slot: set, with domain and slot, when its load is issued
+//   issued    the handle is a task that a domain holds: set, with domain and entry of its task table, when
+//             the task is issued. A task that follows it block by block is then issued behind it.
 //   done      the task that defines the handle has finished
 //   ref       tasks renamed with this handle as their data (s1) and not yet done
 //   unmapped  the mapping of the handle has ended: no later task can name it
@@ -41,6 +43,7 @@ module tsched_handle_file import tsched_pkg::*; #(
   input  phys_t                 ref_dec_p_i,
   // wake-up buses
   input  wake_place_t           place_i,
+  input  wake_run_t             run_i,
   input  wake_done_t            done_i,
   // a task that computes on the data of use_i was issued
   input  logic                  use_valid_i,
@@ -63,11 +66,12 @@ module tsched_handle_file import tsched_pkg::*; #(
   logic  [NumPhys-1:0]           live_d, live_q;
   logic  [NumPhys-1:0]           unmapped_d, unmapped_q;
   logic  [NumPhys-1:0]           placed_d, placed_q;
+  logic  [NumPhys-1:0]           issued_d, issued_q;
   logic  [NumPhys-1:0]           done_d, done_q;
   logic  [NumPhys-1:0]           used_d, used_q;
   logic  [NumPhys-1:0][RefW-1:0] ref_d, ref_q;
   dom_t  [NumPhys-1:0]           dom_q;
-  slot_t [NumPhys-1:0]           slot_q;
+  hloc_t [NumPhys-1:0]           loc_q;
 
   // -------------------------------------------------------------------------------------------
   // Release sweep
@@ -113,7 +117,7 @@ module tsched_handle_file import tsched_pkg::*; #(
 
   always_ff @(posedge clk_i) begin
     slot_free_dom_o     <= dom_q[gc_q];
-    slot_free_o         <= slot_q[gc_q];
+    slot_free_o         <= slot_t'(loc_q[gc_q]);
     unused_dec_dom_o[0] <= dom_q[use_i];
     unused_dec_dom_o[1] <= dom_q[gc_q];
   end
@@ -127,6 +131,7 @@ module tsched_handle_file import tsched_pkg::*; #(
     live_d     = live_q;
     unmapped_d = unmapped_q;
     placed_d   = placed_q;
+    issued_d   = issued_q;
     done_d     = done_q;
     used_d     = used_q;
     if (gc_v_q) live_d[gc_q] = 1'b0;
@@ -136,12 +141,14 @@ module tsched_handle_file import tsched_pkg::*; #(
       live_d[alloc_i]     = 1'b1;
       unmapped_d[alloc_i] = 1'b0;
       placed_d[alloc_i]   = 1'b0;
+      issued_d[alloc_i]   = 1'b0;
       done_d[alloc_i]     = 1'b0;
     end
     for (int unsigned k = 0; k < 2; k++) begin
       if (unmap_valid_i[k]) unmapped_d[unmap_i[k]] = 1'b1;
     end
     if (place_i.v) placed_d[place_i.tag] = 1'b1;
+    if (run_i.v)   issued_d[run_i.tag]   = 1'b1;
     if (done_i.v)  done_d[done_i.tag]    = 1'b1;
   end
 
@@ -157,6 +164,7 @@ module tsched_handle_file import tsched_pkg::*; #(
       live_q     <= '0;
       unmapped_q <= '0;
       placed_q   <= '0;
+      issued_q   <= '0;
       done_q     <= '0;
       used_q     <= '0;
       ref_q      <= '0;
@@ -166,6 +174,7 @@ module tsched_handle_file import tsched_pkg::*; #(
       live_q     <= live_d;
       unmapped_q <= unmapped_d;
       placed_q   <= placed_d;
+      issued_q   <= issued_d;
       done_q     <= done_d;
       used_q     <= used_d;
       ref_q      <= ref_d;
@@ -174,16 +183,27 @@ module tsched_handle_file import tsched_pkg::*; #(
     end
   end
 
-  // Read only while `placed` is set, so no reset.
+  // Read only while `placed` or `issued` is set, so no reset. One write per cycle: the cluster level never
+  // issues a load and a task in the same cycle (tsched_load_issue waits a cycle for a task).
+  logic  wr_v;
+  phys_t wr_tag;
+  dom_t  wr_dom;
+  hloc_t wr_loc;
+  assign wr_v   = place_i.v | run_i.v;
+  assign wr_tag = run_i.v ? run_i.tag : place_i.tag;
+  assign wr_dom = run_i.v ? run_i.dom : place_i.dom;
+  assign wr_loc = run_i.v ? hloc_t'(run_i.tix) : hloc_t'(place_i.slot);
+
   always_ff @(posedge clk_i) begin
-    if (place_i.v) begin
-      dom_q[place_i.tag]  <= place_i.dom;
-      slot_q[place_i.tag] <= place_i.slot;
+    if (wr_v) begin
+      dom_q[wr_tag] <= wr_dom;
+      loc_q[wr_tag] <= wr_loc;
     end
   end
 
   for (genvar r = 0; r < NumRead; r++) begin : gen_read
-    assign rd_o[r]     = '{placed: placed_q[rd_i[r]], done: done_q[rd_i[r]], dom: dom_q[rd_i[r]], slot: slot_q[rd_i[r]]};
+    assign rd_o[r]     = '{placed: placed_q[rd_i[r]], issued: issued_q[rd_i[r]], done: done_q[rd_i[r]],
+                           dom: dom_q[rd_i[r]], loc: loc_q[rd_i[r]]};
     assign rd_sat_o[r] = &ref_q[rd_i[r]];
   end
 
@@ -196,6 +216,8 @@ module tsched_handle_file import tsched_pkg::*; #(
         else $error("[tsched_handle_file] reference of handle %0d returned twice", ref_dec_p_i);
       assert (!(ref_inc_i && !ref_dec_i && (&ref_q[ref_inc_p_i])))
         else $error("[tsched_handle_file] reference counter of handle %0d overflows", ref_inc_p_i);
+      assert (!(place_i.v && run_i.v))
+        else $error("[tsched_handle_file] a load and a task issued in the same cycle (handles %0d, %0d)", place_i.tag, run_i.tag);
       assert (!(ref_inc_i && unmapped_q[ref_inc_p_i]))
         else $error("[tsched_handle_file] reference on handle %0d after its mapping ended", ref_inc_p_i);
     end

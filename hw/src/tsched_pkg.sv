@@ -126,6 +126,10 @@ package tsched_pkg;
   typedef logic [AddrW-1:0]  addr_t;
   typedef logic [NumCls-1:0] cls_t;
   typedef logic [VslowW-1:0] vslow_t;
+  // Where a handle is, as the handle file keeps it next to the domain: the slot of loaded data, or the entry
+  // of a running task in the task table of its domain.
+  localparam int unsigned HlocW = (SlotW > TixW) ? SlotW : TixW;
+  typedef logic [HlocW-1:0]  hloc_t;
 
   // ---------------------------------------------------------------------------------------------
   // Task instructions (host to cluster level), in program order and no longer speculative
@@ -133,6 +137,7 @@ package tsched_pkg;
   typedef enum logic [1:0] {
     TLoad = 2'd0,   // hd <- stream `len` bytes from L2 address `addr` into a free L1 slot
     TRun  = 2'd1,   // hd <- run `nblk` blocks of kernel `kern` on the data of hs1, after hs2 is done
+                    //       (with `chain`: block by block behind the blocks of the task of hs2)
     TJoin = 2'd2,   // hd <- done once every older task is done
     TFree = 2'd3    // release hs1 and its slot
   } top_e;
@@ -147,6 +152,9 @@ package tsched_pkg;
     logic  kill;     // TRun: last use of hs1, release it when this task retires
     logic  hs2_v;    // TRun: handle that must be done before the task starts
     arch_t hs2;
+    logic  chain;    // TRun: hs2 is a task with the same number of blocks, and this task follows it block by
+                     // block: its k-th block may start once k blocks of that task are done. The kernels pass
+                     // on which block that was (through L1, which every PE reaches); the scheduler counts.
     cls_t  cls;      // TRun: PE classes that may run the blocks
     vslow_t vslow;   // TRun, both classes: log2 of how much longer a block takes on a vector unit; 0: no hint
     nblk_t nblk;     // TRun: number of blocks, at least 1
@@ -161,12 +169,15 @@ package tsched_pkg;
   // ---------------------------------------------------------------------------------------------
   typedef struct packed {
     wid_t  wid;
+    tix_t  tix;      // entry of the task table the task takes (the cluster level keeps track of the free ones)
     cls_t  cls;
     vslow_t vslow;
     nblk_t nblk;
     logic  slot_v;   // the task has data in a slot of this domain
     logic  follow;   // blocks become eligible as that slot fills
     slot_t slot;
+    logic  ftask;    // blocks become eligible as the blocks of the task in entry ptix are done
+    tix_t  ptix;
     kern_t kern;
     arg_t  arg;
   } run_req_t;
@@ -183,9 +194,9 @@ package tsched_pkg;
     wid_t  wid;
     logic  is_load;
     logic  is_ret;   // a block of domain `dom`, task index `tix` there, is done
-    nblk_t nblk;     // run: blocks of the finished task
+    nblk_t nblk;     // run: blocks of the finished task; is_ret: bit 0 is the PE class that ran the block
     dom_t  dom;
-    tix_t  tix;
+    tix_t  tix;      // run: the entry the task leaves
   } done_t;
 
   // ---------------------------------------------------------------------------------------------
@@ -217,6 +228,12 @@ package tsched_pkg;
     tix_t tix;       // task index in that domain
   } gdone_t;
 
+  // A block that a domain gave away is done: the entry of its task there, and the PE class that ran it.
+  typedef struct packed {
+    logic cls;
+    tix_t tix;
+  } ret_t;
+
   // ---------------------------------------------------------------------------------------------
   // Balancing by the cluster level
   // ---------------------------------------------------------------------------------------------
@@ -232,7 +249,7 @@ package tsched_pkg;
 `ifdef TSCHED_BOR_DEPTH `TSCHED_BOR_DEPTH `else 2 `endif;
   localparam int unsigned WantW    = $clog2(GroupsPerDomain + 1);
   // A domain does not fill next-block registers in advance for a class that a domain within reach wants
-  // (tsched_balance, wanted). 0 only to measure what the rule brings.
+  // (tsched_balance, wanted) or is running blocks of this domain for. 0 only to measure what the rule brings.
   localparam bit          BalHold  =
 `ifdef TSCHED_BAL_HOLD `TSCHED_BAL_HOLD `else 1'b1 `endif;
 
@@ -294,6 +311,9 @@ package tsched_pkg;
     logic  follow;
     logic  s2_v;
     phys_t s2;
+    logic  chain;    // follow the task of s2 block by block
+    logic  pd_v;
+    phys_t pd;       // handle the task defines: told to the tasks that wait to follow it when it is issued
     cls_t  cls;
     vslow_t vslow;
     nblk_t nblk;
@@ -303,10 +323,11 @@ package tsched_pkg;
 
   // State of a handle, as the handle file returns it.
   typedef struct packed {
-    logic  placed;   // has a domain and a slot (set when its load is issued)
+    logic  placed;   // data with a domain and a slot (set when its load is issued)
+    logic  issued;   // a task that is in the task table of a domain (set when the task is issued)
     logic  done;
     dom_t  dom;
-    slot_t slot;
+    hloc_t loc;      // placed: the slot; issued: the entry of the task table
   } hstate_t;
 
   // ---------------------------------------------------------------------------------------------
@@ -319,6 +340,14 @@ package tsched_pkg;
     dom_t  dom;
     slot_t slot;
   } wake_place_t;
+
+  // A task was issued: the tasks that follow it block by block can be issued behind it.
+  typedef struct packed {
+    logic  v;
+    phys_t tag;
+    dom_t  dom;
+    tix_t  tix;
+  } wake_run_t;
 
   // A task finished: its handle is done.
   typedef struct packed {

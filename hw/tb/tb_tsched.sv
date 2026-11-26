@@ -14,7 +14,8 @@
 //   every block of every task starts exactly once, on a PE class the task allows
 //   a block of a task that follows the stream starts only when enough of its slot has arrived;
 //   a block of any other task with data starts only when the slot is complete
-//   a task starts only after the tasks it must wait for are done
+//   a task starts only after the tasks it must wait for are done; a task chained to another one starts
+//   its k-th block only after k blocks of that task are done
 //   a slot is not loaded again while a task still uses it
 //   the program ends with an empty window and every task done
 
@@ -87,6 +88,7 @@ module tb_tsched;
   bit [NumCls-1:0] t_cls [];
   int unsigned t_nblk [];
   bit          t_follow [];
+  bit          t_chain [];            // the task follows task t_dep block by block
   int unsigned t_need [];             // tasks 0 .. need-1 must be done before this one starts
   int          t_dep [];              // this task must be done before, or -1
 
@@ -120,6 +122,7 @@ module tb_tsched;
     t_cls    = new[n_tasks];
     t_nblk   = new[n_tasks];
     t_follow = new[n_tasks];
+    t_chain  = new[n_tasks];
     t_need   = new[n_tasks];
     t_dep    = new[n_tasks];
     for (int t = 0; t < n_tasks; t++) begin
@@ -128,6 +131,7 @@ module tb_tsched;
       t_cls[t]    = cls[NumCls-1:0];
       t_nblk[t]   = nblk;
       t_follow[t] = follow[0];
+      t_chain[t]  = follow[1];
       for (int k = 0; k < NumCls * n_hop; k++) n = $fscanf(fd, "%d", dur[t * NumCls * n_hop + k]);
     end
     $fclose(fd);
@@ -137,7 +141,9 @@ module tb_tsched;
     while ($fscanf(fd, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", op, hd_v, hd, hs1_v, hs1, follow, kill,
                    hs2_v, hs2, cls, nblk, kern, arg, len, addr) == 15) begin
       i = '{op: top_e'(op[1:0]), hd_v: hd_v[0], hd: hd[ArchW-1:0], hs1_v: hs1_v[0], hs1: hs1[ArchW-1:0],
-            follow: follow[0], kill: kill[0], hs2_v: hs2_v[0], hs2: hs2[ArchW-1:0], cls: cls[NumCls-1:0],
+            follow: follow[0], kill: kill[0], hs2_v: hs2_v[0], hs2: hs2[ArchW-1:0],
+            chain: follow[1],                     // the file keeps the chain flag above the follow flag
+            cls: cls[NumCls-1:0],
             vslow: cls[NumCls+VslowW-1:NumCls],   // the file keeps the speed hint above the classes
             nblk: nblk[NblkW-1:0], kern: kern[KernW-1:0], arg: arg[ArgW-1:0], len: len[LenW-1:0],
             addr: addr[AddrW-1:0]};
@@ -156,6 +162,7 @@ module tb_tsched;
 
   bit [(1<<NblkW)-1:0] t_started [];  // blocks of a task that have started
   int unsigned t_ndone [];            // blocks of a task that are done
+  int unsigned t_nstart [];           // blocks of a task that have started
   bit          t_done [];
   int unsigned done_prefix;           // tasks 0 .. done_prefix-1 are done
   int unsigned tasks_done;
@@ -172,6 +179,7 @@ module tb_tsched;
   longint unsigned st_busy [NumCls], st_blocks [NumCls], st_away [NumCls];
   longint unsigned st_lane_cycles, st_loads, st_win_sum;
   int unsigned     st_win_max, st_riq_max;
+  longint unsigned st_chained;        // blocks of chained tasks started while the task they follow was running
 
   function automatic void err(input string s);
     errors++;
@@ -319,7 +327,13 @@ module tb_tsched;
             t_started[t][b.bidx] = 1'b1;
             if (done_prefix < t_need[t])
               err($sformatf("task %0d started with only the first %0d tasks done, needs %0d", t, done_prefix, t_need[t]));
-            if (t_dep[t] >= 0 && !t_done[t_dep[t]])
+            t_nstart[t]++;
+            if (t_dep[t] >= 0 && t_chain[t]) begin
+              if (t_nstart[t] > t_ndone[t_dep[t]])
+                err($sformatf("task %0d started block number %0d with %0d blocks of task %0d done", t, t_nstart[t],
+                              t_ndone[t_dep[t]], t_dep[t]));
+              if (!t_done[t_dep[t]]) st_chained++;
+            end else if (t_dep[t] >= 0 && !t_done[t_dep[t]])
               err($sformatf("task %0d started before task %0d was done", t, t_dep[t]));
             if (b.slot_v) begin
               automatic int unsigned pr = slot_prog(b.dom, b.slot);
@@ -386,8 +400,8 @@ module tb_tsched;
              st_blocks[ClsV], st_away[ClsT], st_away[ClsV]);
     $display("[tb] RESULT busy_tensor=%0d busy_vector=%0d lane_cycles=%0d loads=%0d", st_busy[ClsT], st_busy[ClsV],
              st_lane_cycles, st_loads);
-    $display("[tb] RESULT win_max=%0d win_mean=%0.2f riq_max=%0d", st_win_max,
-             cycle ? real'(st_win_sum) / real'(cycle) : 0.0, st_riq_max);
+    $display("[tb] RESULT win_max=%0d win_mean=%0.2f riq_max=%0d chained_early=%0d", st_win_max,
+             cycle ? real'(st_win_sum) / real'(cycle) : 0.0, st_riq_max, st_chained);
   endtask
 
   initial begin
@@ -401,6 +415,7 @@ module tb_tsched;
     load_files();
     t_started  = new[n_tasks];
     t_ndone    = new[n_tasks];
+    t_nstart   = new[n_tasks];
     t_done     = new[n_tasks];
     t_slot_dom = new[n_tasks];
     t_slot     = new[n_tasks];

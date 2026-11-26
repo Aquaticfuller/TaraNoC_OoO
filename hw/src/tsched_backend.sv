@@ -19,6 +19,13 @@
 // Flow control to the domains is by counting here, not by ready wires: a domain holds at most
 // DomTaskDepth tasks (credits) and streams one load at a time. The links can therefore be pipelined
 // freely. Completions return with valid/ready.
+//
+// The cluster level also says which entry of the domain's task table a task takes. So it knows where a
+// running task is, and a task that follows another one block by block (chain) is sent behind it with the
+// number of that entry. The number must never name a later task. A chained task can still be granted as
+// "behind a running task" in the cycle after that task's completion was taken here (the issue queue hears of
+// it a cycle later). So the entry and the credit of a finished task return one cycle after the completion:
+// a task that gets the entry is then granted after every such chained task, and reaches the domain after it.
 
 module tsched_backend import tsched_pkg::*; #(
   parameter bit BalEn = 1'b1
@@ -51,7 +58,7 @@ module tsched_backend import tsched_pkg::*; #(
   input  logic     [NumDomains-1:0] bpop_cls_i,
   output logic     [NumDomains-1:0][NumCls-1:0] wanted_o,   // a domain within reach wants the class
   output logic     [NumDomains-1:0] ret_valid_o,    // a block that a domain gave away is done
-  output tix_t                      ret_tix_o,
+  output ret_t                      ret_o,
   // no task in the window
   output logic                      idle_o
 );
@@ -76,7 +83,11 @@ module tsched_backend import tsched_pkg::*; #(
   logic        grant_valid, grant_any, issue_valid;
   dom_t        grant_dom;
   phys_t       issue_s1;
+  logic        issue_pd_v;
+  phys_t       issue_pd;
   run_req_t    issue;
+  tix_t        issue_tix_q;
+  wake_run_t   wake_run;
   logic  [1:0] unmap_valid;
   phys_t [1:0] unmap;
   logic        free_valid;
@@ -174,6 +185,7 @@ module tsched_backend import tsched_pkg::*; #(
     .ref_dec_i         (rdec_v_q),
     .ref_dec_p_i       (rdec_q),
     .place_i           (place),
+    .run_i             (wake_run),
     .done_i            (wake_done_q),
     .use_valid_i       (issue_valid & issue.slot_v),
     .use_i             (issue_s1),
@@ -199,6 +211,9 @@ module tsched_backend import tsched_pkg::*; #(
   dom_t     issue_dom;
 
   logic run_done;          // a run finished in domain dn_src_q
+  logic rel_v_q;           // one cycle later: its entry and its credit return
+  dom_t rel_dom_q;
+  tix_t rel_tix_q;
   logic load_done;         // a load finished in domain dn_src_q
   assign run_done  = dn_valid_q & ~dn_q.is_load & ~dn_q.is_ret & (dn_src_q != DnW'(NumDomains));
   assign load_done = dn_valid_q &  dn_q.is_load;
@@ -213,21 +228,53 @@ module tsched_backend import tsched_pkg::*; #(
       dec = run_done & (dn_src_q == DnW'(d));
       // Blocks are counted when the task is read from its entry, credits one stage earlier.
       blk_out_d[d] = blk_out_q[d] + (iss ? BlkCntW'(issue.nblk) : '0) - (dec ? BlkCntW'(dn_q.nblk) : '0);
-      cred_d[d]    = cred_q[d] + CredW'(dec) - CredW'(gnt);
+      cred_d[d]    = cred_q[d] + CredW'(rel_v_q & (rel_dom_q == dom_t'(d))) - CredW'(gnt);
       // The task in the grant stage has not taken its credit yet.
       credit_ok[d] = (cred_q[d] > CredW'(1)) | ((cred_q[d] == CredW'(1)) & ~gnt);
     end
   end
 
+  // Entries of the task tables in use. The task in the grant stage takes the lowest free entry of its
+  // domain (it holds a credit, so there is one); the entry returns with the completion of the task.
+  logic [NumDomains-1:0][DomTaskDepth-1:0] tix_used_d, tix_used_q;
+  logic [DomTaskDepth-1:0]                 gtix_free, gtix_oh;
+  tix_t                                    gtix;
+
+  assign gtix_free = ~tix_used_q[grant_dom];
+  assign gtix_oh   = gtix_free & (~gtix_free + DomTaskDepth'(1));
+  always_comb begin
+    gtix = '0;
+    for (int unsigned t = 0; t < DomTaskDepth; t++) if (gtix_oh[t]) gtix |= tix_t'(t);
+  end
+
+  always_comb begin
+    tix_used_d = tix_used_q;
+    if (rel_v_q)     tix_used_d[rel_dom_q][rel_tix_q] = 1'b0;
+    if (grant_valid) tix_used_d[grant_dom] |= gtix_oh;
+  end
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      blk_out_q <= '0;
-      cred_q    <= {NumDomains{CredW'(DomTaskDepth)}};
+      blk_out_q  <= '0;
+      cred_q     <= {NumDomains{CredW'(DomTaskDepth)}};
+      tix_used_q <= '0;
+      rel_v_q    <= 1'b0;
     end else begin
-      blk_out_q <= blk_out_d;
-      cred_q    <= cred_d;
+      blk_out_q  <= blk_out_d;
+      cred_q     <= cred_d;
+      tix_used_q <= tix_used_d;
+      rel_v_q    <= run_done;
     end
   end
+
+  always_ff @(posedge clk_i) begin
+    if (grant_valid) issue_tix_q <= gtix;
+    rel_dom_q <= dn_src_q[DomW-1:0];
+    rel_tix_q <= dn_q.tix;
+  end
+
+  // The task in the issue stage is in entry issue_tix_q of domain issue_dom from now on.
+  assign wake_run = '{v: issue_valid & issue_pd_v, tag: issue_pd, dom: issue_dom, tix: issue_tix_q};
 
   // -------------------------------------------------------------------------------------------
   // Loads
@@ -246,6 +293,7 @@ module tsched_backend import tsched_pkg::*; #(
     .slot_free_valid_i (slot_free_valid),
     .slot_free_dom_i   (slot_free_dom),
     .slot_free_i       (slot_free),
+    .hold_i            (grant_valid),
     .load_valid_o,
     .load_o,
     .place_o           (place)
@@ -306,6 +354,7 @@ module tsched_backend import tsched_pkg::*; #(
     .s1_state_i    (hf_state[0]),
     .s2_state_i    (hf_state[1]),
     .place_i       (place),
+    .run_i         (wake_run),
     .done_i        (wake_done_q),
     .credit_ok_i   (credit_ok),
     .any_ok_i      (any_ok),
@@ -316,6 +365,8 @@ module tsched_backend import tsched_pkg::*; #(
     .issue_valid_o (issue_valid),
     .issue_dom_o   (issue_dom),
     .issue_s1_o    (issue_s1),
+    .issue_pd_v_o  (issue_pd_v),
+    .issue_pd_o    (issue_pd),
     .issue_o       (issue)
   );
 
@@ -323,7 +374,10 @@ module tsched_backend import tsched_pkg::*; #(
     run_valid_o = '0;
     run_valid_o[issue_dom] = issue_valid;
   end
-  assign run_o = issue;
+  always_comb begin
+    run_o     = issue;
+    run_o.tix = issue_tix_q;
+  end
 
   // -------------------------------------------------------------------------------------------
   // Completions: one per cycle, round robin over the domains and the join of the window
@@ -382,7 +436,7 @@ module tsched_backend import tsched_pkg::*; #(
     dn_q       <= arb_out;
     dn_src_q   <= arb_idx;
     wake_tag_q <= dn_pd;
-    ret_tix_o  <= dn_q.tix;
+    ret_o      <= '{cls: dn_q.nblk[0], tix: dn_q.tix};
     rdec_q     <= dn_s1;
   end
 
@@ -413,6 +467,8 @@ module tsched_backend import tsched_pkg::*; #(
       for (int unsigned d = 0; d < NumDomains; d++) begin
         assert (!(grant_valid && (grant_dom == dom_t'(d)) && (cred_q[d] == '0)))
           else $error("[tsched_backend] task issued to domain %0d without a credit", d);
+        assert (32'($countones(tix_used_q[d])) + 32'(cred_q[d]) == DomTaskDepth)
+          else $error("[tsched_backend] domain %0d: %0d entries in use with %0d credits", d, $countones(tix_used_q[d]), cred_q[d]);
       end
     end
   end

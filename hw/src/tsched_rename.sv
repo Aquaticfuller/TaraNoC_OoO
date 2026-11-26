@@ -78,6 +78,7 @@ module tsched_rename import tsched_pkg::*; (
     phys_t old;
     logic  kill_v;    // the mapping of hs1 ends, and it is not the one in `old`
     logic  follow;
+    logic  chain;
     cls_t  cls;
     vslow_t vslow;
     nblk_t nblk;
@@ -190,6 +191,7 @@ module tsched_rename import tsched_pkg::*; (
     old:    old,
     kill_v: kill & ~(old_v & (instr_i.hd == instr_i.hs1)),
     follow: instr_i.follow,
+    chain:  instr_i.chain & s2_v,
     cls:    instr_i.cls,
     vslow:  instr_i.vslow,
     nblk:   instr_i.nblk,
@@ -260,6 +262,7 @@ module tsched_rename import tsched_pkg::*; (
 
   assign riq_valid_o = r_fire & r_run;
   assign riq_o       = '{wid: win_wid_i, s1_v: r.s1_v, s1: r.s1, follow: r.follow, s2_v: r.s2_v, s2: r.s2,
+                         chain: r.chain, pd_v: r.pd_v, pd: r.pd,
                          cls: r.cls, vslow: r.vslow, nblk: r.nblk, kern: r.kern, arg: r.arg};
 
 `ifndef TARGET_SYNTHESIS

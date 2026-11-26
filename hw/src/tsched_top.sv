@@ -52,8 +52,8 @@ module tsched_top import tsched_pkg::*; #(
   logic      [NumDomains-1:0] be_bpop_valid, be_bpop_cls, cl_bpop_valid, cl_bpop_cls;
   logic      [NumDomains-1:0][NumCls-1:0] be_wanted, cl_wanted;
   logic      [NumDomains-1:0] be_ret_valid, cl_ret_valid;
-  tix_t                       be_ret_tix;
-  tix_t      [NumDomains-1:0] cl_ret_tix;
+  ret_t                       be_ret;
+  ret_t      [NumDomains-1:0] cl_ret;
 
   logic      [NumDomains-1:0] cl_run_valid, cl_load_valid;
   run_req_t  [NumDomains-1:0] cl_run;
@@ -87,7 +87,7 @@ module tsched_top import tsched_pkg::*; #(
     .bpop_cls_i   (be_bpop_cls),
     .wanted_o     (be_wanted),
     .ret_valid_o  (be_ret_valid),
-    .ret_tix_o    (be_ret_tix),
+    .ret_o        (be_ret),
     .idle_o
   );
 
@@ -107,7 +107,7 @@ module tsched_top import tsched_pkg::*; #(
     logic      bblk_v [LinkStages+1];
     blk_t      bblk_p [LinkStages+1];
     logic      ret_v  [LinkStages+1];
-    tix_t      ret_p  [LinkStages+1];
+    ret_t      ret_p  [LinkStages+1];
     rep_t      rep_p  [LinkStages+1];
     logic      rblk_v [LinkStages+1];
     rblk_t     rblk_p [LinkStages+1];
@@ -124,7 +124,7 @@ module tsched_top import tsched_pkg::*; #(
     assign bblk_v[0] = be_bblk_valid[d];
     assign bblk_p[0] = be_bblk;
     assign ret_v[0]  = be_ret_valid[d];
-    assign ret_p[0]  = be_ret_tix;
+    assign ret_p[0]  = be_ret;
     assign rep_p[0]  = cl_rep[d];
     assign rblk_v[0] = cl_rblk_valid[d];
     assign rblk_p[0] = cl_rblk[d];
@@ -189,7 +189,7 @@ module tsched_top import tsched_pkg::*; #(
     assign cl_bblk_valid[d] = bblk_v[LinkStages];
     assign cl_bblk[d]       = bblk_p[LinkStages];
     assign cl_ret_valid[d]  = ret_v[LinkStages];
-    assign cl_ret_tix[d]    = ret_p[LinkStages];
+    assign cl_ret[d]        = ret_p[LinkStages];
     assign be_rep[d]        = rep_p[LinkStages];
     assign be_rblk_valid[d] = rblk_v[LinkStages];
     assign be_rblk[d]       = rblk_p[LinkStages];
@@ -229,7 +229,7 @@ module tsched_top import tsched_pkg::*; #(
     .bpop_cls_o   (cl_bpop_cls),
     .wanted_i     (cl_wanted),
     .ret_valid_i  (cl_ret_valid),
-    .ret_tix_i    (cl_ret_tix),
+    .ret_i        (cl_ret),
     .dma_valid_o,
     .dma_ready_i,
     .dma_o,

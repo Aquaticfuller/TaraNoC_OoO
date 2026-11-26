@@ -24,6 +24,7 @@ module tsched_group_disp import tsched_pkg::*; (
   output logic                 gdone_valid_o,
   input  logic                 gdone_ready_i,
   output gdone_t               gdone_o,
+  output logic                 gdone_cls_o,   // PE class that ran the block
   // PEs: tensor engines first, then vector units. One block bus per class.
   output logic  [NumPes-1:0]   pe_start_o,
   output blk_t  [NumCls-1:0]   pe_blk_o,
@@ -74,6 +75,8 @@ module tsched_group_disp import tsched_pkg::*; (
   assign pe_done_ready_o = ~pend_q;
   assign done_fire       = pe_done_valid_i & pe_done_ready_o;
 
+  logic [$clog2(NumPes)-1:0] arb_idx;
+
   rr_arb_tree #(
     .NumIn     (NumPes),
     .DataType  (gdone_t),
@@ -92,8 +95,9 @@ module tsched_group_disp import tsched_pkg::*; (
     .req_o   (gdone_valid_o),
     .gnt_i   (gdone_ready_i),
     .data_o  (gdone_o),
-    .idx_o   (/* unused */)
+    .idx_o   (arb_idx)
   );
+  assign gdone_cls_o = (32'(arb_idx) >= NumTensor) ? 1'(ClsV) : 1'(ClsT);
 
   always_comb begin
     buf_v_d = buf_v_q & ~start;

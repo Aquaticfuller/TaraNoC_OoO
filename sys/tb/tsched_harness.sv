@@ -145,7 +145,9 @@ module tsched_harness import tsched_pkg::*; #(
     while ($fscanf(fd, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", op, hd_v, hd, hs1_v, hs1, follow, kill,
                    hs2_v, hs2, cls, nblk, kern, arg, len, addr) == 15) begin
       i = '{op: top_e'(op[1:0]), hd_v: hd_v[0], hd: hd[ArchW-1:0], hs1_v: hs1_v[0], hs1: hs1[ArchW-1:0],
-            follow: follow[0], kill: kill[0], hs2_v: hs2_v[0], hs2: hs2[ArchW-1:0], cls: cls[NumCls-1:0],
+            follow: follow[0], kill: kill[0], hs2_v: hs2_v[0], hs2: hs2[ArchW-1:0],
+            chain: follow[1],                     // the file keeps the chain flag above the follow flag
+            cls: cls[NumCls-1:0],
             vslow: cls[NumCls+VslowW-1:NumCls],   // the file keeps the speed hint above the classes
             nblk: nblk[NblkW-1:0], kern: kern[KernW-1:0], arg: arg[ArgW-1:0], len: len[LenW-1:0],
             addr: addr[AddrW-1:0]};
@@ -276,9 +278,9 @@ module tsched_harness import tsched_pkg::*; #(
             t_start[g][p] = cycle;
             last_event    = cycle;
             if (first_start == 0) first_start = cycle;
-            if (trace) $display("[tsched] T %0d start %s group %0d pe %0d kernel %0d block %0d of %0d domain %0d data %0d", cycle,
+            if (trace) $display("[tsched] T %0d start %s group %0d pe %0d kernel %0d block %0d of %0d domain %0d data %0d arg %0d", cycle,
                                 (c == ClsT) ? "tensor" : "vector", g, p, pe_blk[g][c].kern, pe_blk[g][c].bidx, pe_blk[g][c].nblk,
-                                dom_of_group(g), pe_blk[g][c].dom);
+                                dom_of_group(g), pe_blk[g][c].dom, pe_blk[g][c].arg);
             if (dom_of_group(g) != int'(pe_blk[g][c].dom)) st_away[c]++;
           end
           if (pe_done_valid[g][p] && pe_done_ready[g][p]) begin

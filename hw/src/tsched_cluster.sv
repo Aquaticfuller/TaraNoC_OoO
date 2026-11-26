@@ -36,7 +36,7 @@ module tsched_cluster import tsched_pkg::*; #(
   output logic      [NumDomains-1:0]          bpop_cls_o,
   input  logic      [NumDomains-1:0][NumCls-1:0] wanted_i,
   input  logic      [NumDomains-1:0]          ret_valid_i,
-  input  tix_t      [NumDomains-1:0]          ret_tix_i,
+  input  ret_t      [NumDomains-1:0]          ret_i,
   // DMA engines, per group
   output logic      [NumGroups-1:0]           dma_valid_o,
   input  logic      [NumGroups-1:0]           dma_ready_i,
@@ -62,6 +62,7 @@ module tsched_cluster import tsched_pkg::*; #(
     logic   [GroupsPerDomain-1:0][NumCls-1:0] pop, idle;
     logic   [GroupsPerDomain-1:0]             gdone_valid, gdone_ready;
     gdone_t [GroupsPerDomain-1:0]             gdone;
+    logic   [GroupsPerDomain-1:0]             gdone_cls;
     logic   [GroupsPerDomain-1:0]             dma_valid, dma_ready, dma_done;
     dma_req_t [GroupsPerDomain-1:0]           dma;
 
@@ -90,6 +91,7 @@ module tsched_cluster import tsched_pkg::*; #(
       .gdone_valid_i  (gdone_valid),
       .gdone_ready_o  (gdone_ready),
       .gdone_i        (gdone),
+      .gdone_cls_i    (gdone_cls),
       .rep_o          (rep_o[d]),
       .give_valid_i   (give_valid_i[d]),
       .give_i         (give_i[d]),
@@ -101,7 +103,7 @@ module tsched_cluster import tsched_pkg::*; #(
       .bpop_cls_o     (bpop_cls_o[d]),
       .wanted_i       (wanted_i[d]),
       .ret_valid_i    (ret_valid_i[d]),
-      .ret_tix_i      (ret_tix_i[d])
+      .ret_i          (ret_i[d])
     );
 
     for (genvar j = 0; j < GroupsPerDomain; j++) begin : gen_group
@@ -122,6 +124,7 @@ module tsched_cluster import tsched_pkg::*; #(
         .gdone_valid_o   (gdone_valid[j]),
         .gdone_ready_i   (gdone_ready[j]),
         .gdone_o         (gdone[j]),
+        .gdone_cls_o     (gdone_cls[j]),
         .pe_start_o      (pe_start_o[Gm]),
         .pe_blk_o        (pe_blk_o[Gm]),
         .pe_done_valid_i (pe_done_valid_i[Gm]),
