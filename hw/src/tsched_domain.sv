@@ -8,10 +8,10 @@
 //           cutting is a counter: `next` blocks have been handed out, `elig` may be handed out, `out`
 //           are running. A task is done when all its blocks have been handed out and none is running
 //           (the join counter).
-// Chain     A task can follow another task of the domain block by block: each block of that task that is done
-//           makes one block of this task eligible. The scheduler only counts; which block of the first task
-//           a block of the second works on is passed on by the kernels through L1. The cluster level sends
-//           such a task to this domain with the entry of the task it follows.
+// Chain     A task can follow another task block by block, in this domain or another: each block of that task
+//           that is done makes one block of the follower eligible. The scheduler only counts; which block of
+//           the first task a block of the second works on is passed on by the kernels through L1. The domain
+//           of the first task sends its progress to the follower through the cluster level.
 // Stream    One load at a time. Each group DMA moves its share of the load in ChunksPerGroup chunks; the
 //           chunks every group has finished are the progress of the slot. A task that follows the
 //           stream gets its blocks eligible in proportion to that progress.
@@ -52,6 +52,7 @@ module tsched_domain import tsched_pkg::*; #(
   // cluster level
   input  logic                                    run_valid_i,
   input  run_req_t                                run_i,
+  input  logic                                    reg_valid_i,    // the task in entry run_i.ptix has a follower
   input  logic                                    load_valid_i,
   input  load_req_t                               load_i,
   output logic                                    done_valid_o,
@@ -212,70 +213,146 @@ module tsched_domain import tsched_pkg::*; #(
     ins_oh[ins_idx] = run_valid_i;
   end
 
-  // Chained tasks. t_fol[t]: task t follows the task in entry t_fp[t] (one-hot): the completions of that
-  // task, which are subtracted from its running blocks in this cycle (t_dec_q), become eligible blocks of
-  // task t. The link ends when the first task leaves the table; all its blocks are done then, and all have
-  // been passed on.
-  // The blocks that were done before task t arrived are added once, two cycles after the arrival (cu1, cu2):
-  // the first cycle reads them from the counters of the first task (handed out minus running), the second
-  // adds them. The link counts from the first of these cycles, and the counters read in it hold exactly the
-  // completions before it, so no block is passed on twice and none is lost.
-  logic  [T-1:0]             t_fol_d, t_fol_q;
-  logic  [T-1:0][T-1:0]      t_fp_q;
-  logic                      lnk;                    // the arriving task follows a task that is still here
-  logic  [T-1:0]             lnk_p;
-  logic  [T-1:0]             cu1_q, cu1_p_q, cu2_q;
-  nblk_t                     cu_d, cu_q, cu_sum;
-  logic  [T-1:0][DecW-1:0]   fol_dec;
-  logic  [DecW-1:0]          cu_dec;
+  // Chained tasks. A task can be followed block by block by one other task, in this domain or another
+  // (t_rf, with the domain and entry of the follower). What the follower has been told so far is counted
+  // per task (t_sent); the blocks done are the blocks handed out minus those running. The difference is sent
+  // as progress messages through the completion path, up to 2^ProgW - 1 blocks per message; the cluster
+  // level forwards them, and the follower gets that many eligible blocks.
+  // One task at a time is served, in three steps, so that the subtraction is shared and starts at registers:
+  //   idle  pick a task that has news for its follower (t_dirty: a block was done, or the follower is new)
+  //   calc  owed = handed out - running - sent, from the counters of that task
+  //   send  one message with min(owed, 2^ProgW - 1) blocks; nothing if owed is zero
+  // A task stays marked if more was owed than one message carries, or if a block was done after the counters
+  // were read. It leaves the table only when it is not marked.
+  // The follower is registered when it is issued (reg_valid_i, with the task link's payload). A registration
+  // that finds its task gone (it finished while the follower was on its way) is answered with one message
+  // "all done" (gone). The entry cannot hold a later task yet: the cluster level gives it out again only to a
+  // task issued after the follower.
+  logic  [T-1:0]             t_rf_d, t_rf_q;
+  dom_t  [T-1:0]             t_rfd_q;
+  tix_t  [T-1:0]             t_rft_q;
+  nblk_t [T-1:0]             t_sent_q;
+  logic  [T-1:0]             t_dirty_d, t_dirty_q;
+  logic  [T-1:0]             reg_oh;
+  logic                      reg_hit, reg_gone;
+  logic  [T-1:0]             gone_d, gone_q;
+  dom_t  [T-1:0]             gone_dom_q;
+  tix_t  [T-1:0]             gone_tix_q;
+  logic  [T-1:0]             gone_oh;
+  logic                      prog_take, gone_take;
+
+  typedef enum logic [1:0] {PsIdle, PsCalc, PsSend} ps_e;
+  ps_e                       ps_d, ps_q;
+  logic  [T-1:0]             ps_cand, ps_first, ps_oh_d, ps_oh_q;
+  nblk_t                     ps_owe_d, ps_owe_q;      // blocks owed to the follower of the task being served
+  logic                      ps_new_d, ps_new_q;      // a block of that task was done after its counters were read
+  logic                      ps_dec;                  // ... in this cycle
+  logic                      ps_more, ps_fin;
+  logic  [ProgW-1:0]         prog_n;
+  nblk_t                     ps_sent_new;
 
   always_comb begin
-    lnk_p = '0;
-    lnk_p[run_i.ptix] = 1'b1;
+    reg_oh = '0;
+    reg_oh[run_i.ptix] = 1'b1;
   end
-  assign lnk = run_i.ftask & t_valid_q[run_i.ptix] & ~t_take[run_i.ptix];
+  assign reg_hit  = reg_valid_i &  (t_valid_q[run_i.ptix] & ~t_take[run_i.ptix]);
+  assign reg_gone = reg_valid_i & ~(t_valid_q[run_i.ptix] & ~t_take[run_i.ptix]);
+
+  assign ps_cand = t_valid_q & t_rf_q & t_dirty_q;
+  for (genvar t = 0; t < T; t++) begin : gen_prog
+    assign ps_first[t] = ps_cand[t] & ~(|(ps_cand & T'((32'd1 << t) - 32'd1)));
+    assign gone_oh[t]  = gone_q[t]  & ~(|(gone_q  & T'((32'd1 << t) - 32'd1)));
+  end
+
+  assign ps_more = ps_owe_q > nblk_t'(2**ProgW - 1);
+  assign prog_n  = ps_more ? '1 : ps_owe_q[ProgW-1:0];
+  // The served task is done with: its message was taken, or there was nothing to tell.
+  assign ps_fin  = (ps_q == PsSend) & (prog_take | (ps_owe_q == '0));
 
   always_comb begin
-    nblk_t nx, ou;
-    nx = '0;
-    ou = '0;
-    for (int unsigned p = 0; p < T; p++) begin
-      nx |= {NblkW{cu1_p_q[p]}} & t_next_q[p];
-      ou |= {NblkW{cu1_p_q[p]}} & t_out_q[p];
-    end
-    cu_d = nx - ou;
+    nblk_t nx, ou, se;
+    nx     = '0;
+    ou     = '0;
+    se     = '0;
+    ps_dec = 1'b0;
     for (int unsigned t = 0; t < T; t++) begin
-      fol_dec[t] = '0;
-      for (int unsigned p = 0; p < T; p++) fol_dec[t] |= {DecW{t_fol_q[t] & t_fp_q[t][p]}} & t_dec_q[p];
-      t_fol_d[t] = t_fol_q[t] & ~(|(t_fp_q[t] & t_take)) & ~t_take[t];
-      if (ins_oh[t]) t_fol_d[t] = lnk;
+      nx     |= {NblkW{ps_oh_q[t]}} & t_next_q[t];
+      ou     |= {NblkW{ps_oh_q[t]}} & t_out_q[t];
+      se     |= {NblkW{ps_oh_q[t]}} & t_sent_q[t];
+      ps_dec |= ps_oh_q[t] & (t_dec_q[t] != '0);
     end
-    // One task arrives per cycle, so one task at most is in its second catch-up cycle: one adder for all.
-    cu_dec = '0;
-    for (int unsigned t = 0; t < T; t++) cu_dec |= {DecW{cu2_q[t]}} & fol_dec[t];
-    cu_sum = cu_q + nblk_t'(cu_dec);
+    ps_sent_new = se + nblk_t'(prog_n);
+    ps_d     = ps_q;
+    ps_oh_d  = ps_oh_q;
+    ps_owe_d = ps_owe_q;
+    ps_new_d = ps_new_q | ps_dec;
+    unique case (ps_q)
+      PsIdle: if (|ps_cand) begin
+        ps_d    = PsCalc;
+        ps_oh_d = ps_first;
+      end
+      PsCalc: begin
+        // The counters hold the completions of the earlier cycles; one that is subtracted in this cycle or
+        // later (t_dec_q) is noted in ps_new.
+        ps_owe_d = nx - ou - se;
+        ps_new_d = ps_dec;
+        ps_d     = PsSend;
+      end
+      PsSend: if (ps_fin) ps_d = PsIdle;
+      default: ps_d = PsIdle;
+    endcase
+    for (int unsigned t = 0; t < T; t++) begin
+      t_rf_d[t]    = t_rf_q[t] & ~t_take[t];
+      // Marked again by every block that is done; the mark is taken off only when all that was done up to
+      // the reading of the counters has been sent and nothing was done since.
+      t_dirty_d[t] = (t_dirty_q[t] & ~(ps_fin & ps_oh_q[t] & ~ps_more & ~ps_new_q))
+                   | (t_rf_q[t] & (t_dec_q[t] != '0));
+      if (reg_hit && reg_oh[t]) begin
+        t_rf_d[t]    = 1'b1;
+        t_dirty_d[t] = 1'b1;
+      end
+      if (ins_oh[t]) begin
+        t_rf_d[t]    = 1'b0;
+        t_dirty_d[t] = 1'b0;
+      end
+      gone_d[t] = (gone_q[t] & ~(gone_take & gone_oh[t])) | (reg_gone & reg_oh[t]);
+    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      t_fol_q <= '0;
-      cu1_q   <= '0;
-      cu2_q   <= '0;
+      t_rf_q    <= '0;
+      t_dirty_q <= '0;
+      gone_q    <= '0;
+      ps_q      <= PsIdle;
     end else begin
-      t_fol_q <= t_fol_d;
-      cu1_q   <= ins_oh & {T{lnk}};
-      cu2_q   <= cu1_q;
+      t_rf_q    <= t_rf_d;
+      t_dirty_q <= t_dirty_d;
+      gone_q    <= gone_d;
+      ps_q      <= ps_d;
     end
   end
 
   always_ff @(posedge clk_i) begin
-    cu1_p_q <= lnk_p;
-    cu_q    <= cu_d;
-    if (run_valid_i) t_fp_q[ins_idx] <= lnk_p;
+    ps_oh_q  <= ps_oh_d;
+    ps_owe_q <= ps_owe_d;
+    ps_new_q <= ps_new_d;
+    for (int unsigned t = 0; t < T; t++) begin
+      if (prog_take && ps_oh_q[t]) t_sent_q[t] <= ps_sent_new;
+    end
+    if (reg_hit) begin
+      t_rfd_q[run_i.ptix]  <= run_i.fdom;
+      t_rft_q[run_i.ptix]  <= run_i.tix;
+      t_sent_q[run_i.ptix] <= '0;
+    end
+    if (reg_gone) begin
+      gone_dom_q[run_i.ptix] <= run_i.fdom;
+      gone_tix_q[run_i.ptix] <= run_i.tix;
+    end
   end
 
   for (genvar t = 0; t < T; t++) begin : gen_task
-    assign t_fin[t] = t_valid_q[t] & (t_next_q[t] == t_nblk_q[t]) & (t_out_q[t] == '0);
+    assign t_fin[t] = t_valid_q[t] & (t_next_q[t] == t_nblk_q[t]) & (t_out_q[t] == '0) & ~(t_rf_q[t] & t_dirty_q[t]);
   end
 
   // The decision of this cycle (cut_oh) is the last signal to arrive. Both outcomes of every counter and
@@ -299,9 +376,8 @@ module tsched_domain import tsched_pkg::*; #(
         t_inc_d[t]   = nblk_t'(sum >> ChunkW);
         t_acc_d[t]   = sum[ChunkW-1:0];
       end
-      // A chained task: the blocks its first task finished (it follows no stream at the same time).
-      if (t_fol_q[t]) t_inc_d[t] = nblk_t'(fol_dec[t]);
-      if (cu2_q[t])   t_inc_d[t] = cu_sum;
+      // A chained task: the progress of the task it follows (it follows no stream at the same time).
+      if (ret_valid_i && ret_i.prog && (ret_i.tix == tix_t'(t))) t_inc_d[t] = ret_i.all ? t_nblk_q[t] : nblk_t'(ret_i.n);
       left_a = t_left_q[t] + t_inc_q[t];
       out_m  = t_out_q[t] - nblk_t'(t_dec_q[t]);
       if (cut_oh[t]) begin
@@ -324,9 +400,9 @@ module tsched_domain import tsched_pkg::*; #(
         t_ticks_d[t] = '0;
         t_acc_d[t]   = '0;
         // A task that follows a stream or a task starts with no eligible block.
-        t_left_d[t]  = ((run_i.follow & run_i.slot_v) | lnk) ? '0 : run_i.nblk;
-        t_avail_d[t] = ~((run_i.follow & run_i.slot_v) | lnk);
-        t_spare_d[t] = ~((run_i.follow & run_i.slot_v) | lnk) & ({1'b0, run_i.nblk} >= (NblkW+1)'(LendMin));
+        t_left_d[t]  = ((run_i.follow & run_i.slot_v) | run_i.ftask) ? '0 : run_i.nblk;
+        t_avail_d[t] = ~((run_i.follow & run_i.slot_v) | run_i.ftask);
+        t_spare_d[t] = ~((run_i.follow & run_i.slot_v) | run_i.ftask) & ({1'b0, run_i.nblk} >= (NblkW+1)'(LendMin));
       end
     end
   end
@@ -346,23 +422,21 @@ module tsched_domain import tsched_pkg::*; #(
   assign tb_in_d  = tb_in_q + ((run_valid_i && run_i.cls[ClsT]) ? BlkCntW'(run_i.nblk) : '0);
   assign tb_out_d = cut_ten ? tb_out_q + BlkCntW'(1) : tb_out_q;
 
-  // The same backlog for the vector units (vb), and per class whether the backlog is deep: more blocks than the
-  // PEs of the class in this domain run in two rounds. Only then is a next block prepared behind a busy PE.
+  // Per class, whether the backlog is deep: more blocks than the PEs of the class in this domain run in two
+  // rounds. Only then is a next block prepared behind a busy PE. For the tensor engines this is the backlog
+  // counted above; for the vector units it is enough to ask whether one task has that many eligible blocks
+  // (a vector block is long, so preparing the next one early saves little).
   // A block prepared can no longer be given away or go to another group, and with a short backlog it may be
   // one of the last: a PE of another group or domain that becomes idle a moment later would have run it a
   // whole block sooner. (Measured on one domain of the cluster hardware: without this, single blocks of a
   // 128-block task were left for a round of their own.)
   localparam int unsigned DeepT = 2 * DomTensor;
   localparam int unsigned DeepV = 2 * GroupsPerDomain * NumVector;
-  logic [BlkCntW-1:0]      vb_in_d, vb_in_q, vb_out_d, vb_out_q, vb_q;
-  logic [T-1:0]            t_vec;
-  logic                    cut_vec;
+  logic [T-1:0]            t_vdeep;
   logic [NumCls-1:0]       deep_q;
   for (genvar t = 0; t < T; t++) begin : gen_vec
-    assign t_vec[t] = t_cls_q[t][ClsV];
+    assign t_vdeep[t] = t_valid_q[t] & t_cls_q[t][ClsV] & (t_left_q[t] >= nblk_t'(DeepV));
   end
-  assign vb_in_d  = vb_in_q + ((run_valid_i && run_i.cls[ClsV]) ? BlkCntW'(run_i.nblk) : '0);
-  assign vb_out_d = cut_vec ? vb_out_q + BlkCntW'(1) : vb_out_q;
 
   // A task that names both classes with a hint keeps its blocks off the vector units unless the backlog
   // is large enough (tb_over, below) and no tensor engine within reach is without work (a block there ends
@@ -393,9 +467,6 @@ module tsched_domain import tsched_pkg::*; #(
       tb_q      <= '0;
       tb_in_q   <= '0;
       tb_out_q  <= '0;
-      vb_q      <= '0;
-      vb_in_q   <= '0;
-      vb_out_q  <= '0;
       deep_q    <= '0;
     end else begin
       t_valid_q <= t_valid_d;
@@ -408,10 +479,7 @@ module tsched_domain import tsched_pkg::*; #(
       tb_q      <= tb_in_q - tb_out_q;
       tb_in_q   <= tb_in_d;
       tb_out_q  <= tb_out_d;
-      vb_q      <= vb_in_q - vb_out_q;
-      vb_in_q   <= vb_in_d;
-      vb_out_q  <= vb_out_d;
-      deep_q    <= {vb_q >= BlkCntW'(DeepV), tb_q >= BlkCntW'(DeepT)};
+      deep_q    <= {|t_vdeep, tb_q >= BlkCntW'(DeepT)};
     end
   end
 
@@ -633,7 +701,6 @@ module tsched_domain import tsched_pkg::*; #(
   assign cut_oh = ({T{sel_g}} & k_give) | ({T{sel_u}} & k_urg) | ({T{sel_p}} & k_pre);
   // The same choice, reduced per tier in parallel, so that the backlog counter sees it as early as the tasks do.
   assign cut_ten = (sel_g & (|(k_give & t_ten))) | (sel_u & (|(k_urg & t_ten))) | (sel_p & (|(k_pre & t_ten)));
-  assign cut_vec = (sel_g & (|(k_give & t_vec))) | (sel_u & (|(k_urg & t_vec))) | (sel_p & (|(k_pre & t_vec)));
 
   // -------------------------------------------------------------------------------------------
   // Speed hint: how long the tensor engines need for the backlog
@@ -658,7 +725,7 @@ module tsched_domain import tsched_pkg::*; #(
   assign ret_recent = rhold_q != '0;
   for (genvar c = 0; c < NumCls; c++) begin : gen_away
     assign give_c[c] = give_ok & (d_cls_q == 1'(c));
-    assign ret_c[c]  = ret_valid_i & (ret_i.cls == 1'(c));
+    assign ret_c[c]  = ret_valid_i & ~ret_i.prog & (ret_i.cls == 1'(c));
   end
 
   always_comb begin
@@ -670,7 +737,7 @@ module tsched_domain import tsched_pkg::*; #(
     if (!give_c[ClsV] && ret_c[ClsV]) awayv_d = awayv_q - BlkCntW'(1);
     rhold_d = rhold_q;
     if (rhold_q != '0) rhold_d = rhold_q - 4'd1;
-    if (ret_valid_i)   rhold_d = 4'(RetHold);
+    if (ret_valid_i && !ret_i.prog) rhold_d = 4'(RetHold);
     tb_over[0] = 1'b1;
     for (int unsigned k = 1; k < 2**VslowW; k++) begin
       thr_d[k]   = ThrW'(eng_q) * ThrW'((1 << k) - 1);
@@ -831,7 +898,7 @@ module tsched_domain import tsched_pkg::*; #(
 
   always_comb begin
     for (int unsigned t = 0; t < T; t++) begin
-      t_dec_d[t] = DecW'(ret_valid_i & (ret_i.tix == tix_t'(t)));
+      t_dec_d[t] = DecW'(ret_valid_i & ~ret_i.prog & (ret_i.tix == tix_t'(t)));
       for (int unsigned g = 0; g < G; g++) begin
         t_dec_d[t] += DecW'(gdone_valid_i[g] & ~gdone_i[g].bor & (gdone_i[g].tix == tix_t'(t)));
       end
@@ -859,8 +926,8 @@ module tsched_domain import tsched_pkg::*; #(
   end
 
   // -------------------------------------------------------------------------------------------
-  // Completions to the cluster level: the load first, then a block run for another domain, then the
-  // lowest finished task
+  // Completions to the cluster level: the load first, then the answer to a late registration, a block run
+  // for another domain, progress for a follower, and the lowest finished task
   // -------------------------------------------------------------------------------------------
   logic  done_v_d, done_v_q;
   done_t done_d, done_q;
@@ -871,7 +938,9 @@ module tsched_domain import tsched_pkg::*; #(
   assign done_can     = ~done_v_q | done_ready_i;
   assign done_load    = done_can & ld_fin;
   assign ld_take      = done_load;
-  assign ret_take     = done_can & ~ld_fin & ret_v_q;
+  assign gone_take    = done_can & ~ld_fin & (|gone_q);
+  assign ret_take     = done_can & ~ld_fin & ~(|gone_q) & ret_v_q;
+  assign prog_take    = done_can & ~ld_fin & ~(|gone_q) & ~ret_v_q & (ps_q == PsSend) & (ps_owe_q != '0);
 
   always_comb begin
     t_take   = '0;
@@ -880,9 +949,23 @@ module tsched_domain import tsched_pkg::*; #(
     if (done_load) begin
       done_v_d = 1'b1;
       done_d   = '{wid: ld_wid_q, is_load: 1'b1, is_ret: 1'b0, nblk: '0, dom: '0, tix: '0};
+    end else if (gone_take) begin
+      done_v_d = 1'b1;
+      done_d   = '{wid: '0, is_load: 1'b0, is_ret: 1'b1, nblk: nblk_t'(3'b110), dom: '0, tix: '0};   // all, prog
+      for (int unsigned t = 0; t < T; t++) begin
+        done_d.dom |= {DomW{gone_oh[t]}} & gone_dom_q[t];
+        done_d.tix |= {TixW{gone_oh[t]}} & gone_tix_q[t];
+      end
     end else if (ret_take) begin
       done_v_d = 1'b1;
       done_d   = '{wid: '0, is_load: 1'b0, is_ret: 1'b1, nblk: nblk_t'(ret_cls_q), dom: ret_dom_q, tix: ret_tix_q};
+    end else if (prog_take) begin
+      done_v_d = 1'b1;
+      done_d   = '{wid: '0, is_load: 1'b0, is_ret: 1'b1, nblk: nblk_t'({prog_n, 3'b010}), dom: '0, tix: '0};   // n, prog
+      for (int unsigned t = 0; t < T; t++) begin
+        done_d.dom |= {DomW{ps_oh_q[t]}} & t_rfd_q[t];
+        done_d.tix |= {TixW{ps_oh_q[t]}} & t_rft_q[t];
+      end
     end else if (done_can) begin
       for (int t = T - 1; t >= 0; t--) begin
         if (t_fin[t]) begin
@@ -912,8 +995,12 @@ module tsched_domain import tsched_pkg::*; #(
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       assert (!(run_valid_i && t_valid_q[ins_idx])) else $error("[tsched_domain %0d] task for entry %0d, which is in use", DomId, ins_idx);
-      assert (!(run_valid_i && lnk && (run_i.nblk != t_nblk_q[run_i.ptix])))
-        else $error("[tsched_domain %0d] a task of %0d blocks follows a task of %0d blocks", DomId, run_i.nblk, t_nblk_q[run_i.ptix]);
+      assert (!(ret_valid_i && ret_i.prog && !t_valid_q[ret_i.tix]))
+        else $error("[tsched_domain %0d] progress for entry %0d, which holds no task", DomId, ret_i.tix);
+      assert (!(reg_gone && gone_q[run_i.ptix] && !(gone_take && gone_oh[run_i.ptix])))
+        else $error("[tsched_domain %0d] two late registrations for entry %0d", DomId, run_i.ptix);
+      assert (!(reg_hit && t_rf_q[run_i.ptix]))
+        else $error("[tsched_domain %0d] entry %0d gets a second follower", DomId, run_i.ptix);
       assert (!(load_valid_i && ld_active_q && !ld_take))
         else $error("[tsched_domain %0d] load while a load is streaming", DomId);
       for (int unsigned g = 0; g < G; g++) assert (!(dma_done_i[g] && (ld_issued_q[g] == ld_cdone_q[g]))) else $error("[tsched_domain %0d] DMA completion without a chunk", DomId);

@@ -54,6 +54,9 @@ module tsched_rename import tsched_pkg::*; (
   // Map table
   // -------------------------------------------------------------------------------------------
   logic  [NumArch-1:0] map_v_d, map_v_q;
+  // A task already follows the task of this handle block by block. A task has room for one such follower.
+  logic  [NumArch-1:0] map_ch_d, map_ch_q;
+  logic                chain;
   phys_t [NumArch-1:0] map_d,   map_q;
 
   logic  is_load, is_run, is_free;
@@ -104,6 +107,7 @@ module tsched_rename import tsched_pkg::*; (
   assign s2_v    = instr_i.hs2_v & map_v_q[instr_i.hs2] & is_run;
   assign s2      = map_q[instr_i.hs2];
   assign kill    = s1_v & (is_free | instr_i.kill);
+  assign chain   = instr_i.chain & s2_v & ~map_ch_q[instr_i.hs2];
   assign old_v   = need_pd & map_v_q[instr_i.hd];
   assign old     = map_q[instr_i.hd];
 
@@ -149,13 +153,16 @@ module tsched_rename import tsched_pkg::*; (
   end
 
   always_comb begin
-    map_v_d = map_v_q;
-    map_d   = map_q;
+    map_v_d  = map_v_q;
+    map_d    = map_q;
+    map_ch_d = map_ch_q;
     if (fire) begin
       if (kill) map_v_d[instr_i.hs1] = 1'b0;
+      if (chain) map_ch_d[instr_i.hs2] = 1'b1;
       if (need_pd) begin
-        map_v_d[instr_i.hd] = 1'b1;
-        map_d[instr_i.hd]   = nf_q;
+        map_v_d[instr_i.hd]  = 1'b1;
+        map_d[instr_i.hd]    = nf_q;
+        map_ch_d[instr_i.hd] = 1'b0;
       end
     end
   end
@@ -163,12 +170,14 @@ module tsched_rename import tsched_pkg::*; (
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       map_v_q    <= '0;
+      map_ch_q   <= '0;
       map_q      <= '0;
       free_q     <= '1;
       nf_valid_q <= 1'b0;
       nf_q       <= '0;
     end else begin
       map_v_q    <= map_v_d;
+      map_ch_q   <= map_ch_d;
       map_q      <= map_d;
       free_q     <= free_d;
       nf_valid_q <= nf_valid_d;
@@ -191,7 +200,7 @@ module tsched_rename import tsched_pkg::*; (
     old:    old,
     kill_v: kill & ~(old_v & (instr_i.hd == instr_i.hs1)),
     follow: instr_i.follow,
-    chain:  instr_i.chain & s2_v,
+    chain:  chain,
     cls:    instr_i.cls,
     vslow:  instr_i.vslow,
     nblk:   instr_i.nblk,

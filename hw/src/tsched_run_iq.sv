@@ -8,18 +8,21 @@
 // Readiness
 //   s1 (data)   ready when its handle is done, or already when it is placed if the task follows the stream
 //   s2 (order)  ready when its handle is done. With `chain` the task follows the task of s2 block by block,
-//               and is ready as soon as that task has been issued: it is then issued behind it, to the same
-//               domain, and that domain releases its blocks as the blocks of the first task are done. A
-//               chained task with data in another domain than the task it follows waits for done instead,
-//               and so does one whose first task is done before it is granted (it is then an ordinary task).
+//               and is ready as soon as that task has been issued: its domain and its entry there are
+//               known then. The chained task goes to a domain like any other task; the domain of the task
+//               it follows is told where it is, and sends it the progress of that task through the cluster
+//               level. A chained task whose first task is done before it is granted is an ordinary task.
 //   An entry watches the two wake-up buses. An entry cannot see a stale match: the handles it names stay
 //   allocated until it has retired (release rule in tsched_rename).
 //
 // Port select
 //   A task whose data is placed goes to the domain that holds the data (its home). The cluster level
 //   does not redirect such a task: PEs of other domains fetch single blocks from the home domain instead.
-//   A chained task goes to the domain of the task it follows.
-//   A task with neither goes to the domain any_dom_i (the least loaded one).
+//   A chained task with placed data goes to the domain of its data, like any task; a chained task without
+//   goes to the domain of the task it follows. So a stage lives with its data, and a stage without data with
+//   the stage before it. (Sending such a stage to the least loaded domain instead was measured: faster when
+//   the neighbours are idle, 20% slower when they have chains of their own, whose entries it takes.)
+//   Any other task goes to the domain any_dom_i (the least loaded one).
 //   The home port must have a credit. One task is granted per cycle.
 //   The least loaded domain is known a few cycles after a credit has returned (any_ok_i). A ready task that
 //   waits for it keeps the younger tasks waiting too: otherwise a younger task with placed data takes the
@@ -60,6 +63,7 @@ module tsched_run_iq import tsched_pkg::*; (
   output phys_t                 issue_s1_o,      // data handle of the task, valid if issue_o.slot_v
   output logic                  issue_pd_v_o,    // handle the task defines
   output phys_t                 issue_pd_o,
+  output dom_t                  issue_pdom_o,    // chained task: the domain of the task it follows
   output run_req_t              issue_o          // without the entry of the task table (tix)
 );
 
@@ -79,9 +83,6 @@ module tsched_run_iq import tsched_pkg::*; (
   logic  [N-1:0] s2_iss_d, s2_iss_q;
   dom_t  [N-1:0] pdom_d, pdom_q;
   tix_t  [N-1:0] ptix_d, ptix_q;
-  // The task can go behind the task of s2: that task is issued, and the data of this one, if any, is in
-  // the same domain. Kept as a register so that the request below stays short.
-  logic  [N-1:0] link_d, link_q;
   // What only the domain needs.
   typedef struct packed {
     wid_t  wid;
@@ -134,8 +135,6 @@ module tsched_run_iq import tsched_pkg::*; (
     pdom_d      = pdom_q;
     ptix_d      = ptix_q;
     for (int unsigned i = 0; i < N; i++) begin
-      logic chain;
-      chain = chain_q[i];
       // The task of s2 is issued. A stale tag cannot do harm: the handle of s2 is only given to another
       // task after it is done, and from then on the entry no longer looks at this state.
       if (valid_q[i] && s2_v_q[i] && run_i.v && (run_i.tag == s2_q[i])) begin
@@ -162,9 +161,7 @@ module tsched_run_iq import tsched_pkg::*; (
         ptix_d[i]      = push_run_hit ? run_i.tix : tix_t'(s2_state_i.loc);
         dom_d[i]       = push_place_hit ? place_i.dom : (s1_placed_d[i] ? s1_state_i.dom : pdom_d[i]);
         slot_d[i]      = push_place_hit ? place_i.slot : slot_t'(s1_state_i.loc);
-        chain          = push_data_i.chain & push_data_i.s2_v;
       end
-      link_d[i] = chain & s2_iss_d[i] & (dom_d[i] == pdom_d[i]);
     end
   end
 
@@ -176,11 +173,14 @@ module tsched_run_iq import tsched_pkg::*; (
     logic s1_ok, s2_ok;
     // A chained task does not follow a stream as well: its data must be complete.
     assign s1_ok    = ~s1_v_q[i] | s1_done_q[i] | (s1_follow_q[i] & s1_placed_q[i] & ~chain_q[i]);
-    assign s2_ok    = ~s2_v_q[i] | s2_done_q[i] | link_q[i];
-    // live: granted now, the task goes behind the task of s2. fixed: its domain is given.
-    assign live[i]  = link_q[i] & ~s2_done_q[i];
+    assign s2_ok    = ~s2_v_q[i] | s2_done_q[i] | (chain_q[i] & s2_iss_q[i]);
+    logic cr;
+    // live: granted now, the task follows the task of s2, which is running. fixed: the task goes to the
+    // domain dom_q: that of its data, or that of the task it follows.
+    assign cr       = credit_ok_i[dom_q[i]];
+    assign live[i]  = chain_q[i] & s2_iss_q[i] & ~s2_done_q[i];
     assign fixed[i] = s1_placed_q[i] | live[i];
-    assign req[i]   = valid_q[i] & s1_ok & s2_ok & (fixed[i] ? credit_ok_i[dom_q[i]] : any_ok_i);
+    assign req[i]   = valid_q[i] & s1_ok & s2_ok & (fixed[i] ? cr : any_ok_i);
     assign hold[i]  = valid_q[i] & s1_ok & s2_ok & ~fixed[i] & ~any_ok_i;
   end
 
@@ -201,7 +201,7 @@ module tsched_run_iq import tsched_pkg::*; (
   // The grant is one-hot, so a field of the granted entry is a one-hot multiplexer over the entries.
   // Grant stage: only the domain, which is narrow.
   localparam int unsigned GntW = 2 + DomW;
-  localparam int unsigned RdW  = $bits(payload_t) + PhysW + SlotW + TixW + 2;
+  localparam int unsigned RdW  = $bits(payload_t) + PhysW + SlotW + TixW + DomW + 2;
 
   logic [N-1:0]           gnt_q;
   logic [N-1:0][GntW-1:0] gnt_fields;
@@ -213,11 +213,12 @@ module tsched_run_iq import tsched_pkg::*; (
   phys_t                  rd_s1;
   slot_t                  rd_slot;
   tix_t                   rd_ptix;
+  dom_t                   rd_pdom;
   logic                   rd_placed, rd_follow;
 
   for (genvar i = 0; i < N; i++) begin : gen_fields
     assign gnt_fields[i] = {fixed[i], live[i], dom_q[i]};
-    assign rd_fields[i]  = {payload_q[i], s1_q[i], slot_q[i], ptix_q[i], s1_placed_q[i], s1_follow_q[i]};
+    assign rd_fields[i]  = {payload_q[i], s1_q[i], slot_q[i], ptix_q[i], pdom_q[i], s1_placed_q[i], s1_follow_q[i]};
   end
 
   tsched_oh_mux #(
@@ -237,7 +238,7 @@ module tsched_run_iq import tsched_pkg::*; (
   ) i_rd_mux (
     .sel_i  (gnt_q),
     .data_i (rd_fields),
-    .data_o ({rd_payload, rd_s1, rd_slot, rd_ptix, rd_placed, rd_follow})
+    .data_o ({rd_payload, rd_s1, rd_slot, rd_ptix, rd_pdom, rd_placed, rd_follow})
   );
 
   always_comb begin
@@ -252,7 +253,6 @@ module tsched_run_iq import tsched_pkg::*; (
       s1_done_q     <= '0;
       s2_done_q     <= '0;
       s2_iss_q      <= '0;
-      link_q        <= '0;
       gnt_q         <= '0;
       grant_valid_o <= 1'b0;
       issue_valid_o <= 1'b0;
@@ -263,7 +263,6 @@ module tsched_run_iq import tsched_pkg::*; (
       s1_done_q     <= s1_done_d;
       s2_done_q     <= s2_done_d;
       s2_iss_q      <= s2_iss_d;
-      link_q        <= link_d;
       gnt_q         <= gnt;
       grant_valid_o <= gnt_any;
       issue_valid_o <= grant_valid_o;
@@ -298,10 +297,11 @@ module tsched_run_iq import tsched_pkg::*; (
       issue_s1_o   <= rd_s1;
       issue_pd_v_o <= rd_payload.pd_v;
       issue_pd_o   <= rd_payload.pd;
-      // A task that goes behind another one reads complete data: it does not follow a stream as well.
+      issue_pdom_o <= rd_pdom;
+      // A task that follows another one reads complete data: it does not follow a stream as well.
       issue_o      <= '{wid: rd_payload.wid, tix: '0, cls: rd_payload.cls, vslow: rd_payload.vslow, nblk: rd_payload.nblk,
                         slot_v: rd_placed, follow: rd_placed & rd_follow & ~grant_live_q, slot: rd_slot,
-                        ftask: grant_live_q, ptix: rd_ptix, kern: rd_payload.kern, arg: rd_payload.arg};
+                        ftask: grant_live_q, ptix: rd_ptix, fdom: '0, kern: rd_payload.kern, arg: rd_payload.arg};
     end
   end
 

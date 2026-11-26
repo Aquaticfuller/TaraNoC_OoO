@@ -21,11 +21,14 @@
 // freely. Completions return with valid/ready.
 //
 // The cluster level also says which entry of the domain's task table a task takes. So it knows where a
-// running task is, and a task that follows another one block by block (chain) is sent behind it with the
-// number of that entry. The number must never name a later task. A chained task can still be granted as
-// "behind a running task" in the cycle after that task's completion was taken here (the issue queue hears of
-// it a cycle later). So the entry and the credit of a finished task return one cycle after the completion:
-// a task that gets the entry is then granted after every such chained task, and reaches the domain after it.
+// running task is. When a task that follows another one block by block (chain) is issued, the domain of the
+// task it follows is told, on a link as long as the task link: "your entry p is followed by entry t of
+// domain d". That domain then sends the progress of its task to (d, t) as messages through the completion
+// path, which the cluster level forwards as it forwards the returns of blocks.
+// The entry number must never name a later task. A chained task can still be granted as "follows a running
+// task" in the cycle after that task's completion was taken here (the issue queue hears of it a cycle later).
+// So the entry and the credit of a finished task return one cycle after the completion: a task that gets the
+// entry is then granted after every such chained task, and reaches the domain after the registration.
 
 module tsched_backend import tsched_pkg::*; #(
   parameter bit BalEn = 1'b1
@@ -39,6 +42,8 @@ module tsched_backend import tsched_pkg::*; #(
   // task ports: one valid per domain, shared payload
   output logic     [NumDomains-1:0] run_valid_o,
   output run_req_t                  run_o,
+  // with the same payload: the task in entry run_o.ptix of this domain is followed by the task being issued
+  output logic     [NumDomains-1:0] reg_valid_o,
   // load ports
   output logic     [NumDomains-1:0] load_valid_o,
   output load_req_t                 load_o,
@@ -85,6 +90,7 @@ module tsched_backend import tsched_pkg::*; #(
   phys_t       issue_s1;
   logic        issue_pd_v;
   phys_t       issue_pd;
+  dom_t        issue_pdom;
   run_req_t    issue;
   tix_t        issue_tix_q;
   wake_run_t   wake_run;
@@ -367,6 +373,7 @@ module tsched_backend import tsched_pkg::*; #(
     .issue_s1_o    (issue_s1),
     .issue_pd_v_o  (issue_pd_v),
     .issue_pd_o    (issue_pd),
+    .issue_pdom_o  (issue_pdom),
     .issue_o       (issue)
   );
 
@@ -375,8 +382,11 @@ module tsched_backend import tsched_pkg::*; #(
     run_valid_o[issue_dom] = issue_valid;
   end
   always_comb begin
-    run_o     = issue;
-    run_o.tix = issue_tix_q;
+    run_o      = issue;
+    run_o.tix  = issue_tix_q;
+    run_o.fdom = issue_dom;
+    reg_valid_o = '0;
+    reg_valid_o[issue_pdom] = issue_valid & issue.ftask;
   end
 
   // -------------------------------------------------------------------------------------------
@@ -436,7 +446,7 @@ module tsched_backend import tsched_pkg::*; #(
     dn_q       <= arb_out;
     dn_src_q   <= arb_idx;
     wake_tag_q <= dn_pd;
-    ret_o      <= '{cls: dn_q.nblk[0], tix: dn_q.tix};
+    ret_o      <= '{prog: dn_q.nblk[1], all: dn_q.nblk[2], n: dn_q.nblk[3+:ProgW], cls: dn_q.nblk[0], tix: dn_q.tix};
     rdec_q     <= dn_s1;
   end
 

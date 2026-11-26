@@ -33,7 +33,7 @@ module tsched_top import tsched_pkg::*; #(
   output logic      [NumGroups-1:0][NumPes-1:0] pe_done_ready_o
 );
 
-  logic      [NumDomains-1:0] be_run_valid, be_load_valid;
+  logic      [NumDomains-1:0] be_run_valid, be_load_valid, be_reg_valid, cl_reg_valid;
   run_req_t                   be_run;
   load_req_t                  be_load;
   logic      [NumDomains-1:0] be_done_valid, be_done_ready;
@@ -71,6 +71,7 @@ module tsched_top import tsched_pkg::*; #(
     .instr_i,
     .run_valid_o  (be_run_valid),
     .run_o        (be_run),
+    .reg_valid_o  (be_reg_valid),
     .load_valid_o (be_load_valid),
     .load_o       (be_load),
     .done_valid_i (be_done_valid),
@@ -95,6 +96,7 @@ module tsched_top import tsched_pkg::*; #(
     // One element per stage boundary; element 0 is the cluster-level end of the forward links and the
     // domain end of the completion link.
     logic      run_v  [LinkStages+1];
+    logic      reg_v  [LinkStages+1];     // a registration: travels with the payload of the task link
     logic      load_v [LinkStages+1];
     run_req_t  run_p  [LinkStages+1];
     load_req_t load_p [LinkStages+1];
@@ -116,6 +118,7 @@ module tsched_top import tsched_pkg::*; #(
     logic [NumCls-1:0] want_p [LinkStages+1];
 
     assign run_v[0]  = be_run_valid[d];
+    assign reg_v[0]  = be_reg_valid[d];
     assign run_p[0]  = be_run;
     assign load_v[0] = be_load_valid[d];
     assign load_p[0] = be_load;
@@ -136,6 +139,7 @@ module tsched_top import tsched_pkg::*; #(
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
           run_v[s+1]  <= 1'b0;
+          reg_v[s+1]  <= 1'b0;
           load_v[s+1] <= 1'b0;
           give_v[s+1] <= 1'b0;
           bblk_v[s+1] <= 1'b0;
@@ -146,6 +150,7 @@ module tsched_top import tsched_pkg::*; #(
           want_p[s+1] <= '0;
         end else begin
           run_v[s+1]  <= run_v[s];
+          reg_v[s+1]  <= reg_v[s];
           load_v[s+1] <= load_v[s];
           give_v[s+1] <= give_v[s];
           bblk_v[s+1] <= bblk_v[s];
@@ -157,7 +162,7 @@ module tsched_top import tsched_pkg::*; #(
         end
       end
       always_ff @(posedge clk_i) begin
-        if (run_v[s])  run_p[s+1]  <= run_p[s];
+        if (run_v[s] || reg_v[s]) run_p[s+1] <= run_p[s];
         if (load_v[s]) load_p[s+1] <= load_p[s];
         if (give_v[s]) give_p[s+1] <= give_p[s];
         if (bblk_v[s]) bblk_p[s+1] <= bblk_p[s];
@@ -181,6 +186,7 @@ module tsched_top import tsched_pkg::*; #(
     end
 
     assign cl_run_valid[d]  = run_v[LinkStages];
+    assign cl_reg_valid[d]  = reg_v[LinkStages];
     assign cl_run[d]        = run_p[LinkStages];
     assign cl_load_valid[d] = load_v[LinkStages];
     assign cl_load[d]       = load_p[LinkStages];
@@ -212,6 +218,7 @@ module tsched_top import tsched_pkg::*; #(
     .clk_i,
     .rst_ni,
     .run_valid_i  (cl_run_valid),
+    .reg_valid_i  (cl_reg_valid),
     .run_i        (cl_run),
     .load_valid_i (cl_load_valid),
     .load_i       (cl_load),

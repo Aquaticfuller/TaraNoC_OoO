@@ -155,6 +155,8 @@ package tsched_pkg;
     logic  chain;    // TRun: hs2 is a task with the same number of blocks, and this task follows it block by
                      // block: its k-th block may start once k blocks of that task are done. The kernels pass
                      // on which block that was (through L1, which every PE reaches); the scheduler counts.
+                     // One task can be followed like this by one other task; a second one that names the same
+                     // handle waits for the whole task.
     cls_t  cls;      // TRun: PE classes that may run the blocks
     vslow_t vslow;   // TRun, both classes: log2 of how much longer a block takes on a vector unit; 0: no hint
     nblk_t nblk;     // TRun: number of blocks, at least 1
@@ -176,8 +178,9 @@ package tsched_pkg;
     logic  slot_v;   // the task has data in a slot of this domain
     logic  follow;   // blocks become eligible as that slot fills
     slot_t slot;
-    logic  ftask;    // blocks become eligible as the blocks of the task in entry ptix are done
-    tix_t  ptix;
+    logic  ftask;    // blocks become eligible with the progress messages of the task it follows
+    tix_t  ptix;     // entry of that task in its own domain, and
+    dom_t  fdom;     // the domain this task goes to: together with tix, what that domain is told (registration)
     kern_t kern;
     arg_t  arg;
   } run_req_t;
@@ -194,7 +197,8 @@ package tsched_pkg;
     wid_t  wid;
     logic  is_load;
     logic  is_ret;   // a block of domain `dom`, task index `tix` there, is done
-    nblk_t nblk;     // run: blocks of the finished task; is_ret: bit 0 is the PE class that ran the block
+    nblk_t nblk;     // run: blocks of the finished task; is_ret: the fields of ret_t (bit 0 cls, 1 prog, 2 all,
+                     // from bit 3 n)
     dom_t  dom;
     tix_t  tix;      // run: the entry the task leaves
   } done_t;
@@ -228,10 +232,16 @@ package tsched_pkg;
     tix_t tix;       // task index in that domain
   } gdone_t;
 
-  // A block that a domain gave away is done: the entry of its task there, and the PE class that ran it.
+  // Messages to a domain about one of its tasks, forwarded by the cluster level from another domain (or from
+  // itself): a block it gave away is done (the PE class that ran it), or progress of the task that its
+  // task `tix` follows: n more blocks of that task are done, or all of them.
+  localparam int unsigned ProgW = 3;
   typedef struct packed {
-    logic cls;
-    tix_t tix;
+    logic             prog;
+    logic             all;
+    logic [ProgW-1:0] n;
+    logic             cls;
+    tix_t             tix;
   } ret_t;
 
   // ---------------------------------------------------------------------------------------------

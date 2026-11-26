@@ -18,6 +18,7 @@ module tsched_cluster import tsched_pkg::*; #(
   input  logic                                rst_ni,
   // cluster level, per domain
   input  logic      [NumDomains-1:0]          run_valid_i,
+  input  logic      [NumDomains-1:0]          reg_valid_i,
   input  run_req_t  [NumDomains-1:0]          run_i,
   input  logic      [NumDomains-1:0]          load_valid_i,
   input  load_req_t [NumDomains-1:0]          load_i,
@@ -74,6 +75,7 @@ module tsched_cluster import tsched_pkg::*; #(
       .clk_i,
       .rst_ni,
       .run_valid_i    (run_valid_i[d]),
+      .reg_valid_i    (reg_valid_i[d]),
       .run_i          (run_i[d]),
       .load_valid_i   (load_valid_i[d]),
       .load_i         (load_i[d]),
