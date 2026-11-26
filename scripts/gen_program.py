@@ -31,12 +31,15 @@ Files written to the output directory
           as measured on the cluster hardware: for the rule that shares a task between the two PE types
   chain   chains of three kernels over a matrix (tensor engines, vector units, tensor engines), cut into several
           chains of tasks or not, with block times as measured on the cluster hardware
+  layer   one transformer layer as eleven tasks (norm, projections, attention, feed-forward part), step after step
+          or chained, with block times as measured on the cluster hardware
 
 usage
   gen_program.py random <out_dir> [--side 4] [--seed 1] [--pieces 200] [--slots 4]
   gen_program.py hint <out_dir> [--side 2] [--blocks 128] [--tasks 1] [--cls 3] [--hint 2] [--tdur 860] [--vdur 3500]
   gen_program.py chain <out_dir> [--side 2] [--blocks 128] [--tasks 1] [--cut 1] [--order chain] [--home 0]
                  [--follow 0] [--tdur 845] [--sdur 2760]
+  gen_program.py layer <out_dir> [--side 2] [--blocks 64] [--tasks 1] [--follow 0] [--both 0] [--hint 2] [--durs d0,...,d10]
   gen_program.py moe <out_dir> --kind midfill --n 64 [--regime x1] [--layers 1] [--block 500] [--vec 8]
                  [--seed 11] [--trace <dir>] [--synthetic] [--vslow]
 """
@@ -240,6 +243,43 @@ def gen_chain(a):
     print('chain: %d matrices, %d blocks each, cut into %d chains, %s order' % (a.tasks, a.blocks, a.cut, a.order))
 
 
+# --------------------------------------------------------------------------------------------- layer
+LAYER_CLS = (CLS_V, CLS_T, CLS_V, CLS_T, CLS_V, CLS_T, CLS_T, CLS_V, CLS_T, CLS_V, CLS_T)
+LAYER_LOAD = {0: (1, 16384), 1: (2, 32768), 6: (3, 16384), 8: (4, 32768), 10: (5, 16384)}   # step: handle, bytes
+LAYER_WHOLE = (3,)      # steps that read all of the step before: never chained
+
+
+def gen_layer(a):
+    """One transformer layer per --tasks, one task per step, as scripts/layer_prog.py writes it for the cluster
+    hardware: norm, QKV projection, pack, scores, softmax, P@V, output projection, norm, gate projection, SiLU,
+    down projection. Steps 0, 1, 6, 8 and 10 have a load (the input, then weights). With --follow 1 every step is
+    chained to the step before, except the scores, which need the whole of K. --durs: cycles of one block of each
+    step, as measured on the cluster hardware.
+    """
+    mesh = Mesh(2 * a.side, 4)
+    hops = hop_values(mesh)
+    p = Program()
+    far = lambda d: [d if h == hops[0] else int(d * 1.05) for h in hops]
+    durs = [int(x) for x in a.durs.split(',')]
+    assert len(durs) == len(LAYER_CLS)
+    for i in range(a.tasks):
+        prev = -1
+        for s, cls in enumerate(LAYER_CLS):
+            hs1 = None
+            if s in LAYER_LOAD:
+                hs1, nbytes = LAYER_LOAD[s]
+                p.load(hs1, nbytes)
+            # --both 1: a projection may also run on vector units, 2^hint times slower there (the speed hint).
+            both = a.both and cls == CLS_T
+            prev = p.run(CLS_ANY if both else cls, a.blocks, far(durs[s]), far(durs[s] << a.hint if both else durs[s]), hs1=hs1, hd=10 + s,
+                         hs2=9 + s if s else None, dep=prev, chain=bool(a.follow) and s not in LAYER_WHOLE, vslow=a.hint if both else 0)
+            if hs1:
+                p.free(hs1)
+    p.join(31)
+    p.write(a.out, mesh, hops)
+    print('layer: %d layers of %d steps x %d blocks, %s' % (a.tasks, len(LAYER_CLS), a.blocks, 'chained' if a.follow else 'step after step'))
+
+
 # --------------------------------------------------------------------------------------------- moe
 def gen_moe(a):
     import numpy as np
@@ -338,7 +378,7 @@ def gen_moe(a):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('mode', choices=('random', 'moe', 'hint', 'chain'))
+    ap.add_argument('mode', choices=('random', 'moe', 'hint', 'chain', 'layer'))
     ap.add_argument('out')
     ap.add_argument('--side', type=int, default=4, help='domains per side (random)')
     ap.add_argument('--seed', type=int, default=11)
@@ -368,5 +408,7 @@ if __name__ == '__main__':
     ap.add_argument('--home', type=int, default=0, help='chain: 1 issues every stage to the domain of the load')
     ap.add_argument('--follow', type=int, default=0, help='chain: 1 sets the chain flag of stages 2 and 3')
     ap.add_argument('--wload', type=int, default=0, help='chain: 1 gives stage 3 a load of its own (its weights)')
+    ap.add_argument('--both', type=int, default=0, help='layer: 1 lets the projections run on vector units too, with the speed hint --hint')
+    ap.add_argument('--durs', default='1338,1886,1308,1356,2063,1351,833,1373,2415,3016,1339', help='layer: cycles of a block of each of the 11 steps')
     a = ap.parse_args()
-    {'random': gen_random, 'moe': gen_moe, 'hint': gen_hint, 'chain': gen_chain}[a.mode](a)
+    {'random': gen_random, 'moe': gen_moe, 'hint': gen_hint, 'chain': gen_chain, 'layer': gen_layer}[a.mode](a)
