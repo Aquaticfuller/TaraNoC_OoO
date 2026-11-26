@@ -180,7 +180,7 @@ for i, col in enumerate(fus):
     for j, s in enumerate(col):
         fu(x, 844 + j * 32, 92, 28, s)
 new(750, 846, 245, 58, '<b>Resource Counters</b>' + SMALL % 'per domain: 4 task entries, free slots,<br>DMA busy · cluster: 32 lanes, 4 per load')
-new(750, 912, 245, 38, '<b>Completion Arbiter</b>' + SMALL % '16 domains and TJoin · one per cycle')
+new(750, 912, 245, 38, '<b>Completion Arbiter</b>' + SMALL % 'done · block returns · chain progress · one per cycle')
 box(750, 958, 245, 32, '<b>16 task ports</b> · one per domain', fill=C['new_dk'], fc='#FFFFFF', sw=1.0)
 new(556, 950, 184, 94, '<b>Balancer</b>' + SMALL % 'moves single blocks from a domain with waiting blocks to a domain with idle PEs, at most 2 steps apart; one move per cycle')
 edge([(740, 974), (750, 974)], color=C['new_dk'], sw=2.2, size=3)
