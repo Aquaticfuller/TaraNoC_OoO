@@ -420,6 +420,14 @@ module tsched_domain import tsched_pkg::*; #(
   end
   logic cut_ten;       // the block cut this cycle is of a task that tensor engines may run (set with cut_oh)
   assign tb_in_d  = tb_in_q + ((run_valid_i && run_i.cls[ClsT]) ? BlkCntW'(run_i.nblk) : '0);
+  // The part of the backlog that tensor engines can run now (tbe_q): without the blocks of chained tasks that
+  // the task they follow has not released yet. The speed hint compares this part with what the engines
+  // finish: counted with the rest, unreleased blocks sent work to the slow vector units while the engines had
+  // nothing to run. Kept as the count of unreleased blocks (two counters that wrap, as above).
+  logic [BlkCntW-1:0]      tbw_in_d, tbw_in_q, tbw_out_d, tbw_out_q, tbe_q;
+  assign tbw_in_d  = tbw_in_q + ((run_valid_i && run_i.cls[ClsT] && run_i.ftask) ? BlkCntW'(run_i.nblk) : '0);
+  assign tbw_out_d = tbw_out_q + ((ret_valid_i && ret_i.prog && t_cls_q[ret_i.tix][ClsT]) ?
+                                  (ret_i.all ? BlkCntW'(t_nblk_q[ret_i.tix]) : BlkCntW'(ret_i.n)) : '0);
   assign tb_out_d = cut_ten ? tb_out_q + BlkCntW'(1) : tb_out_q;
 
   // Per class, whether the backlog is deep: more blocks than the PEs of the class in this domain run in two
@@ -465,6 +473,9 @@ module tsched_domain import tsched_pkg::*; #(
       t_vok_q   <= '0;
       t_hv_q    <= '0;
       tb_q      <= '0;
+      tbw_in_q  <= '0;
+      tbw_out_q <= '0;
+      tbe_q     <= '0;
       tb_in_q   <= '0;
       tb_out_q  <= '0;
       deep_q    <= '0;
@@ -477,6 +488,9 @@ module tsched_domain import tsched_pkg::*; #(
       t_vok_q   <= t_vok_d;
       t_hv_q    <= t_hv_d;
       tb_q      <= tb_in_q - tb_out_q;
+      tbw_in_q  <= tbw_in_d;
+      tbw_out_q <= tbw_out_d;
+      tbe_q     <= (tb_in_q - tb_out_q) - (tbw_in_q - tbw_out_q);
       tb_in_q   <= tb_in_d;
       tb_out_q  <= tb_out_d;
       deep_q    <= {|t_vdeep, tb_q >= BlkCntW'(DeepT)};
@@ -741,7 +755,7 @@ module tsched_domain import tsched_pkg::*; #(
     tb_over[0] = 1'b1;
     for (int unsigned k = 1; k < 2**VslowW; k++) begin
       thr_d[k]   = ThrW'(eng_q) * ThrW'((1 << k) - 1);
-      tb_over[k] = ThrW'(tb_q) > thr_q[k];
+      tb_over[k] = ThrW'(tbe_q) > thr_q[k];
     end
   end
 
@@ -1021,6 +1035,9 @@ module tsched_domain import tsched_pkg::*; #(
           else $error("[tsched_domain %0d] task %0d: more completions than blocks running", DomId, t);
         assert (!(t_valid_q[t] && t_cls_q[t][ClsT] && (32'(BlkCntW'(tb_in_q - tb_out_q)) < 32'(t_nblk_q[t] - t_next_q[t]))))
           else $error("[tsched_domain %0d] task %0d: tensor backlog below the blocks the task has left", DomId, t);
+        assert (!(t_valid_q[t] && t_cls_q[t][ClsT] &&
+                  (32'(BlkCntW'((tb_in_q - tb_out_q) - (tbw_in_q - tbw_out_q))) < 32'(t_left_q[t]) + 32'(t_inc_q[t]))))
+          else $error("[tsched_domain %0d] task %0d: runnable tensor backlog below the eligible blocks of the task", DomId, t);
         assert (!(t_valid_q[t] && (32'(t_next_q[t]) + 32'(t_left_q[t]) + 32'(t_inc_q[t]) > 32'(t_nblk_q[t]))))
           else $error("[tsched_domain %0d] task %0d: more blocks eligible than it has", DomId, t);
         assert (!(cut_oh[t] && !t_avail_q[t]))
