@@ -40,12 +40,15 @@ module tsched_disp_bridge import tsched_pkg::*; #(
   output logic [NumCores-1:0]                 disp_done_ready_o
 );
 
-  localparam int unsigned VecPerTile = CoresPerTile - 1;
+  // The vector units of a tile are its last cores; the cores before them are scalar (the first drives the
+  // tensor engine).
+  localparam int unsigned VecPerTile = NumVector / TilesPerGroup;
+  localparam int unsigned FirstVec   = CoresPerTile - VecPerTile;
 
   // Core of PE p of a group, counted inside the group.
   function automatic int unsigned core_of(input int unsigned p);
     if (p < NumTensor) return p * CoresPerTile;
-    return ((p - NumTensor) / VecPerTile) * CoresPerTile + 1 + (p - NumTensor) % VecPerTile;
+    return ((p - NumTensor) / VecPerTile) * CoresPerTile + FirstVec + (p - NumTensor) % VecPerTile;
   endfunction
 
   function automatic logic [95:0] pack(input blk_t b);
@@ -57,20 +60,27 @@ module tsched_disp_bridge import tsched_pkg::*; #(
     return w;
   endfunction
 
-  for (genvar g = 0; g < NumGroups; g++) begin : gen_group
-    for (genvar p = 0; p < NumPes; p++) begin : gen_pe
-      localparam int unsigned Core = tsched_sys_pkg::zid_of_group(g) * CoresPerGroup + core_of(p);
-      localparam int unsigned Cls  = (p < NumTensor) ? ClsT : ClsV;
-      assign disp_start_o[Core]      = pe_start_i[g][p];
-      assign disp_desc_o[Core]       = DispWidth'(pack(pe_blk_i[g][Cls]));
-      assign pe_done_valid_o[g][p]   = disp_done_valid_i[Core];
-      assign disp_done_ready_o[Core] = pe_done_ready_i[g][p];
+  // A core that is no PE (a scalar core that drives no engine, a Spatz unit the scheduler does not
+  // use) is never started: its inputs are driven to zero, not left open.
+  always_comb begin
+    disp_start_o      = '0;
+    disp_desc_o       = '0;
+    disp_done_ready_o = '0;
+    pe_done_valid_o   = '0;
+    for (int unsigned g = 0; g < NumGroups; g++) begin
+      for (int unsigned p = 0; p < NumPes; p++) begin
+        automatic int unsigned core = tsched_sys_pkg::zid_of_group(g) * CoresPerGroup + core_of(p);
+        disp_start_o[core]      = pe_start_i[g][p];
+        disp_desc_o[core]       = DispWidth'(pack(pe_blk_i[g][(p < NumTensor) ? ClsT : ClsV]));
+        pe_done_valid_o[g][p]   = disp_done_valid_i[core];
+        disp_done_ready_o[core] = pe_done_ready_i[g][p];
+      end
     end
   end
 
 `ifndef TARGET_SYNTHESIS
   initial begin
-    assert (NumTensor == TilesPerGroup && NumVector == TilesPerGroup * VecPerTile)
+    assert (NumTensor == TilesPerGroup && NumVector == TilesPerGroup * VecPerTile && VecPerTile < CoresPerTile)
       else $fatal(1, "[tsched_disp_bridge] %0d tensor and %0d vector PEs per group do not match %0d tiles of %0d cores",
                   NumTensor, NumVector, TilesPerGroup, CoresPerTile);
   end

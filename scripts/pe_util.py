@@ -19,7 +19,7 @@ in that time. Per cycle of a block, in this order of priority:
                             fill      instructions in flight, no unit busy
                             off       the vector engine is not active: scalar code of the kernel or of the loop
 
-usage: pe_util.py <build dir> <trace file> [--kernel 12] [--offset n] [--json out.json]
+usage: pe_util.py <build dir> <trace file> [--kernel 12] [--offset n] [--vec-per-tile 3] [--json out.json]
        The trace must be that of the last run in the build directory (each run overwrites the engine traces).
        Steps are those of the layer kernel (argument bits 11:8); other kernels are one step.
 """
@@ -32,15 +32,17 @@ import re
 NAMES = ['norm1', 'qkv', 'pack', 'score', 'softmax', 'pv', 'wo', 'norm2', 'gu', 'silu', 'wd']
 TB = ['compute', 'wait W', 'wait X', 'wait Y', 'wait Z', 'fill', 'off']
 VB = ['compute', 'memory', 'stall', 'fill', 'off']
-NUM_T, VEC_PER_TILE = 4, 3
+NUM_T, CORES_PER_TILE = 4, 4
 
 ap = argparse.ArgumentParser()
 ap.add_argument('build')
 ap.add_argument('trace')
 ap.add_argument('--kernel', type=int, default=12)
 ap.add_argument('--offset', type=int, help='cycles the engine traces are ahead of the block trace (found from the traces if not given)')
+ap.add_argument('--vec-per-tile', type=int, default=3, help='vector units of a tile (its last cores)')
 ap.add_argument('--json')
 a = ap.parse_args()
+VEC_PER_TILE = a.vec_per_tile
 
 # ------------------------------------------------------------------ blocks of the kernel, from the scheduler's trace
 start = re.compile(r'\[tsched\] T (\d+) start (tensor|vector) group (\d+) pe (\d+) kernel (\d+) block (\d+) of (\d+) domain \d+ data \d+(?: arg (\d+))?')
@@ -107,7 +109,7 @@ def rows(cls, g, p):
     key = (cls, g, p)
     if key not in cache:
         g = tb_group(g)
-        cache[key] = tensor_rows(g, p) if cls == 'tensor' else vector_rows(g, (p - NUM_T) // VEC_PER_TILE, 1 + (p - NUM_T) % VEC_PER_TILE)
+        cache[key] = tensor_rows(g, p) if cls == 'tensor' else vector_rows(g, (p - NUM_T) // VEC_PER_TILE, CORES_PER_TILE - VEC_PER_TILE + (p - NUM_T) % VEC_PER_TILE)
     return cache[key]
 
 

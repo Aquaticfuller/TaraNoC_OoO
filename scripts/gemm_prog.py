@@ -13,6 +13,7 @@ The program, in order
   check       blocks of 512 elements that compare the result with the reference, then one block that reports
 
 usage: gemm_prog.py <out dir> [--blocks 32] [--rows 4] [--cls 1] [--vslow 0] [--warm 64] [--place 0] [--spare 0]
+       [--shared 0..3]  (with --cls 2 and --blocks = vector units of the domain; blocks * rows = 8 * tiles)
        cls: 1 tensor engines, 2 vector units, 3 both. vslow (cls 3 only): a block takes about 2^vslow times as
        long on a vector unit; 0 gives no hint.
 One line of prog.txt: op hd_v hd hs1_v hs1 follow kill hs2_v hs2 cls nblk kern arg len addr (see gen_program.py).
@@ -34,6 +35,8 @@ ap.add_argument('--vslow', type=int, default=0, choices=(0, 1, 2, 3))
 ap.add_argument('--warm', type=int, default=64)
 ap.add_argument('--place', type=int, default=0)
 ap.add_argument('--spare', type=int, default=0)
+ap.add_argument('--shared', type=int, choices=(0, 1, 2, 3), help='projection shared by the Spatz units of a group (kernel 15): '
+                'one block per vector unit, 8 rows per tile; 1 merges the single words, 2 the bursts, 3 both')
 a = ap.parse_args()
 assert a.vslow == 0 or a.cls == 3, 'a speed hint needs a task for both PE types'
 
@@ -58,7 +61,7 @@ extra = [11 + i for i in range(a.place)]
 for h in extra:
     ins(LOAD, hd=h, length=16384, addr='@l2_X')
 ins(LOAD, hd=1, length=nbytes, addr='@l2_X')
-ins(RUN, hd=2, hs1=1, follow=1, kill=1, cls=a.cls | (a.vslow << 2), nblk=a.blocks, kern=K_GEMM, arg=a.rows)
+ins(RUN, hd=2, hs1=1, follow=1, kill=1, cls=a.cls | (a.vslow << 2), nblk=a.blocks, kern=15 if a.shared is not None else K_GEMM, arg=a.shared if a.shared is not None else a.rows)
 for h in extra:
     ins(FREE, hs1=h)
 if a.spare:

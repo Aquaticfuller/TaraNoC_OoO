@@ -8,6 +8,8 @@ package:
 
 dependencies:
   tsched:  { path: "hw" }
+  # Merge slices for the loads that vector units share; instantiated in the groups of the cluster (define MCAST).
+  mcast:   { path: "mcast" }
   # TeraMonster: the tiles, DMA engines and L1 of the cluster (package name `mempool`).
   mempool: { git: "https://github.com/liyinrong/TeraNoC.git", rev: monster-dev }
 
