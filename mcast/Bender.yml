@@ -1,0 +1,15 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Solderpad Hardware License, Version 0.51, see LICENSE for details.
+# SPDX-License-Identifier: SHL-0.51
+
+# The merge slices for loads that several vector units share (the idea of MergeCast, for one-beat lines).
+# No dependencies: the slice can be simulated and measured on its own.
+package:
+  name: mcast
+
+sources:
+  - src/mcast_slice.sv
+
+  - target: any(simulation, test)
+    files:
+      - tb/tb_mcast_slice.sv

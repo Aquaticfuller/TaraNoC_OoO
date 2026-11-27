@@ -28,7 +28,11 @@ Every step is one task of --blocks blocks of 128 / blocks tokens. Two ways to or
   --check     buffers to compare with their references after the layer: any of N1,QKV,P,O,A,N2,GU,M,Y (default Y);
               S, the scores, only with --steps 4, since the softmax works in place
 
-usage: layer_prog.py <out dir> [--blocks 64] [--chain 0] [--check Y] [--warm 64] [--steps 11]
+  --pe        who runs the six projections (steps 1, 3, 5, 6, 8, 10), one character per step: t tensor engines
+              only (default), v vector units only, 1..3 both PE types with that speed hint (a block takes about
+              2^hint times as long on a vector unit). Example: --pe 222122
+
+usage: layer_prog.py <out dir> [--blocks 64] [--chain 0] [--check Y] [--warm 64] [--steps 11] [--pe tttttt]
 One line of prog.txt: op hd_v hd hs1_v hs1 follow kill hs2_v hs2 cls nblk kern arg len addr (see gen_program.py);
 the follow field is 2 for a chained task.
 """
@@ -56,7 +60,9 @@ ap.add_argument('--chain', type=int, default=0, choices=(0, 1))
 ap.add_argument('--check', default='Y')
 ap.add_argument('--warm', type=int, default=64)
 ap.add_argument('--steps', type=int, default=len(STEPS), help='run only the first steps (S can be checked after 4)')
+ap.add_argument('--pe', default='tttttt')
 a = ap.parse_args()
+assert len(a.pe) == 6 and all(c in 'tv123' for c in a.pe)
 assert T % a.blocks == 0
 rows = T // a.blocks
 
@@ -76,6 +82,9 @@ ins(LOAD, hd=LOADS['X'][0], length=LOADS['X'][2], addr=LOADS['X'][1])
 for s, (name, cls, data) in enumerate(STEPS[:a.steps]):
     if data and data != 'X':
         ins(LOAD, hd=LOADS[data][0], length=LOADS[data][2], addr=LOADS[data][1])
+    if cls == CLS_T:
+        c = a.pe[[1, 3, 5, 6, 8, 10].index(s)]
+        cls = CLS_T if c == 't' else CLS_V if c == 'v' else (CLS_T | CLS_V) | (int(c) << 2)
     chained = a.chain and s > 0 and s not in WHOLE
     leaves = a.chain and s + 1 < a.steps and (s + 1) not in WHOLE
     arg = rows | (s << 8) | (int(chained) << 12) | (int(leaves) << 13) | ((s - 1 if chained else 0) << 16)
