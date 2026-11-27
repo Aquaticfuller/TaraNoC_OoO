@@ -35,8 +35,8 @@ ap.add_argument('--vslow', type=int, default=0, choices=(0, 1, 2, 3))
 ap.add_argument('--warm', type=int, default=64)
 ap.add_argument('--place', type=int, default=0)
 ap.add_argument('--spare', type=int, default=0)
-ap.add_argument('--shared', type=int, choices=(0, 1, 2, 3), help='projection shared by the Spatz units of a group (kernel 15): '
-                'one block per vector unit, 8 rows per tile; 1 merges the single words, 2 the bursts, 3 both')
+ap.add_argument('--shared', type=int, choices=range(8), help='projection shared by the Spatz units of a group (kernel 15): '
+                'one block per vector unit, 8 rows per tile; 1 merges the single words, 2 the bursts, 3 both; +4: loads one row ahead')
 a = ap.parse_args()
 assert a.vslow == 0 or a.cls == 3, 'a speed hint needs a task for both PE types'
 
