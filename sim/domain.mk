@@ -85,3 +85,24 @@ run: $(if $(filter 1,$(SW)),sw)
 	  ! grep -q -E '^Error|Offending|\[tsched_[a-z_]+( [0-9]+)?\]|\[mempool_idma_group\]|Missed wake-up' $(BUILD)/transcript || { echo "verdict: FAIL (assertion or lost wake-up messages in the transcript)"; exit 1; }; \
 	  test "$(CHECK)" = 0 || grep -q 'check PASS' $(BUILD)/transcript || { echo "verdict: FAIL (no check PASS line)"; exit 1; }; \
 	  if test "$(CHECK)" = 0; then echo "verdict: PASS (no result check in this program)"; else echo "verdict: PASS (result check passed)"; fi
+
+# ---------------------------------------------------------------- QuestaSim, for looking at waveforms
+#   make -f domain.mk hwq  CONFIG=.. SIDE=.. BUILD=build/<name> DEFS=..            compile (own BUILD, not one of VCS)
+#   make -f domain.mk gui  CONFIG=.. SIDE=.. BUILD=build/<name> DEFS=.. PROG=..    open the GUI with the waves of DO
+#   make -f domain.mk simq ...                                                    the same run without GUI
+# The GUI stops at time 0 with the waves added: type `run 70us` (or `run -a`) in its console.
+QUESTA  ?= questa-2025.3-dz
+DO      ?= $(ROOT)/sim/wave_mcast.do
+VLOG    := -suppress vlog-2583 -suppress vlog-13314 -suppress vlog-13233 -work work -timescale 1ns/1ps \
+           +define+TSCHED_DOM_PER_SIDE=$(SIDE) +define+EXT_DISPATCH=tsched_harness $(DEFS)
+QSIM    = cd $(BUILD) && $(QUESTA) vsim -voptargs=+acc -sv_lib work-dpi/mempool_dpi -work work -suppress vsim-12070 \
+          +PRELOAD=$(TM)/software/bin/apps/baremetal/$(APP) +DIR=$(LINKED) $$PLUS +TIMEOUT=$(TIMEOUT) $(ARGS) work.mempool_tb
+
+.PHONY: hwq gui simq
+hwq:
+	$(HWMAKE) vlog_args="$(VLOG)" compile
+
+gui simq: $(if $(filter 1,$(SW)),sw)
+	@PLUS=$$($(PYBIN)/python3 $(ROOT)/scripts/link_prog.py $(PROG)/prog.txt $(TM)/software/bin/apps/baremetal/$(APP) $(LINKED)) \
+	  || { echo "the program could not be linked"; exit 1; }; \
+	  $(if $(filter gui,$@),$(QSIM) -do $(DO),$(QSIM) -c -do $(DO) -do "run -a; quit -f")
